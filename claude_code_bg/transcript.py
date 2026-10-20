@@ -1,0 +1,165 @@
+"""Transcript reader: decides when a Claude Code turn is finished, and its reply and usage.
+
+A turn is read from the session transcript `<projects>/*/<session_id>.jsonl`, starting at the
+byte offset taken before the send, using only complete lines. The job state
+`<jobs>/<claude_id>/state.json` tells whether background tasks still run.
+"""
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+PROMPT_MATCH_CHARS = 200
+
+
+def projects_dir() -> Path:
+    """
+    Return the Claude Code projects directory: `$CLAUDE_PROJECTS`, else `~/.claude/projects`.
+    """
+    return Path(os.environ.get('CLAUDE_PROJECTS') or Path.home() / '.claude' / 'projects')
+
+
+def jobs_dir() -> Path:
+    """
+    Return the Claude Code jobs directory: `$CLAUDE_JOBS`, else `~/.claude/jobs`.
+    """
+    return Path(os.environ.get('CLAUDE_JOBS') or Path.home() / '.claude' / 'jobs')
+
+
+def path_of(session_id: str) -> Path | None:
+    """
+    Return the transcript of `session_id` (first sorted match of `<projects>/*/<sid>.jsonl`),
+    or None when there is none yet.
+    """
+    if not session_id:
+        return None
+    return next(iter(sorted(projects_dir().glob(f'*/{session_id}.jsonl'))), None)
+
+
+def size(session_id: str) -> int:
+    """
+    Return the transcript size in bytes (0 when it does not exist). Take it before a send:
+    it is the offset that `read_turn` starts from.
+    """
+    path = path_of(session_id)
+    return path.stat().st_size if path else 0
+
+
+def in_flight(claude_id: str) -> int:
+    """
+    Return the number of background tasks still running for the job `claude_id`
+    (`inFlight.tasks` in `<jobs>/<id>/state.json`); 0 when the file is missing or unreadable.
+    """
+    try:
+        state = json.loads((jobs_dir() / claude_id / 'state.json').read_text())
+    except (OSError, ValueError):
+        # No readable job state: treat it as no background task (the turn still needs end_turn).
+        return 0
+    return int((state.get('inFlight') or {}).get('tasks') or 0)
+
+
+@dataclass
+class Turn:
+    """
+    A finished turn: the reply `text`, the `usage` sums (`input`, `cache_read`,
+    `cache_creation`, `output`, `api_calls`, plus `last` = the last API call's three input
+    buckets), the number of distinct end_turn messages `n_end_turns`, and `sig`, which
+    changes whenever the transcript grows or the last message changes. Accept a turn only
+    when two consecutive polls return the same `sig`.
+    """
+    text: str
+    usage: dict
+    n_end_turns: int
+    sig: tuple
+
+
+def read_turn(session_id: str, claude_id: str, offset: int, prompt: str) -> Turn | None:
+    """
+    Return the finished turn after byte `offset`, or None while it still runs.
+
+    Complete means: our user entry is found (not meta, string content that contains the first
+    200 characters of `prompt`); among main-chain entries after it, the last user/assistant
+    entry is an assistant end_turn with non-empty text; every queue enqueue was dequeued or
+    removed; and the job has no in-flight background task. One user message can produce
+    several end_turns (an async subagent or background command finishes after the first);
+    the reply is the text of the last one.
+    """
+    path = path_of(session_id)
+    if path is None:
+        return None
+    with open(path, 'rb') as fh:
+        fh.seek(offset)
+        data = fh.read()
+    entries = _complete_entries(data)
+    start = next((i for i, e in enumerate(entries) if _is_our_prompt(e, prompt)), None)
+    if start is None:
+        return None
+    main = [e for e in entries[start:] if not e.get('isSidechain')]
+    convo = [e for e in main if e.get('type') in ('user', 'assistant')]
+    last = convo[-1] if convo else None
+    if last is None or last.get('type') != 'assistant' or _msg(last).get('stop_reason') != 'end_turn':
+        return None
+    last_id = _msg(last).get('id')
+    texts = [block.get('text', '') for e in convo if e.get('type') == 'assistant' and _msg(e).get('id') == last_id
+             for block in _msg(e).get('content') or []
+             if isinstance(block, dict) and block.get('type') == 'text']
+    if not any(t.strip() for t in texts):
+        return None
+    ops = [e.get('operation') for e in main if e.get('type') == 'queue-operation']
+    if ops.count('enqueue') > ops.count('dequeue') + ops.count('remove'):
+        return None
+    if in_flight(claude_id):
+        return None
+    assistants = [e for e in convo if e.get('type') == 'assistant']
+    n_end = len({_msg(e).get('id') for e in assistants if _msg(e).get('stop_reason') == 'end_turn'})
+    return Turn(text='\n'.join(texts).strip(), usage=_usage(assistants), n_end_turns=n_end,
+                sig=(len(entries), last_id))
+
+
+def _complete_entries(data: bytes) -> list[dict]:
+    # Only lines that end in a newline: the writer may be mid-line. A complete line that is
+    # not JSON is skipped so one bad line cannot block the turn.
+    entries = []
+    for line in data[:data.rfind(b'\n') + 1].splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _msg(entry: dict) -> dict:
+    return entry.get('message') or {}
+
+
+def _is_our_prompt(entry: dict, prompt: str) -> bool:
+    content = _msg(entry).get('content')
+    return (entry.get('type') == 'user' and not entry.get('isMeta') and isinstance(content, str)
+            and prompt[:PROMPT_MATCH_CHARS] in content)
+
+
+def _usage(assistants: list[dict]) -> dict:
+    # One API message can span several lines (one per content block) with the same id and
+    # the same usage: count each message id once.
+    usage = {'input': 0, 'cache_read': 0, 'cache_creation': 0, 'output': 0, 'api_calls': 0,
+             'last': {'input': 0, 'cache_read': 0, 'cache_creation': 0}}
+    seen = set()
+    for entry in assistants:
+        msg = _msg(entry)
+        if msg.get('id') in seen:
+            continue
+        seen.add(msg.get('id'))
+        raw = msg.get('usage') or {}
+        call = {'input': raw.get('input_tokens', 0), 'cache_read': raw.get('cache_read_input_tokens', 0),
+                'cache_creation': raw.get('cache_creation_input_tokens', 0)}
+        for key, value in call.items():
+            usage[key] += value
+        usage['output'] += raw.get('output_tokens', 0)
+        usage['api_calls'] += 1
+        # The last call's context is what Hermes' context compressor should see.
+        usage['last'] = call
+    return usage
