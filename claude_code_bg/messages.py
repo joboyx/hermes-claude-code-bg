@@ -14,6 +14,8 @@ MODEL_NOTE = re.compile(r'^\[Note: model was just switched[^\]]*\]\s*')
 IMAGE_HINT = re.compile(r'^\[Image attached(?: at)?: [^\n]*\][ \t]*$', re.M)
 HISTORY_HEADER = 'Earlier messages in this chat (for context):'
 HISTORY_CAP = 12000  # characters of carried history, header included
+# Hermes' notes to its own agent inside a user message (onboarding, interrupted turn ...).
+SYSTEM_NOTE = re.compile(r'\[System note: .*?\][ \t]*(?:\n|$)', re.S)
 CUT = '> …'
 ATTACHED = re.compile(r'^\[Attached image: (.+) - open it with the Read tool to see it\.\]$', re.M)
 IMAGE_EXT = {'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp'}
@@ -129,8 +131,9 @@ def newest_user(messages: list) -> tuple[dict, int]:
 
 
 def _history_text(message: dict) -> str:
-    """The text of one earlier message: images as `[image]`, Hermes notes and hints removed."""
-    text = MODEL_NOTE.sub('', text_of(message.get('content')).strip())
+    """The text of one earlier message: images as `[image]`; Hermes system and model-switch
+    notes and image hints removed."""
+    text = SYSTEM_NOTE.sub('', MODEL_NOTE.sub('', text_of(message.get('content')).strip()))
     return re.sub(r'\n{3,}', '\n\n', IMAGE_HINT.sub('', text)).strip()
 
 

@@ -133,6 +133,19 @@ class MessagesTest(unittest.TestCase):
                          "> User: look\n> [image]")
         self.assertEqual(messages.history_block([{"role": "system", "content": "sys"}]), "")
 
+    def test_history_block_drops_hermes_system_notes(self):
+        # Hermes adds notes for its own agent (onboarding, interrupted turn) to user messages;
+        # they name Hermes tools the Claude session does not have.
+        onboarding = ("Remember FIG-7.\n\n[System note: This is the user's very first message ever. "
+                      "OFFER to build a profile (mention /help).\n  1. Ask what they share.\n"
+                      "  2. Save facts with the memory tool using target=\"user\".\n"
+                      "If they decline, stop.]")
+        interrupted = "[System note: Your previous turn was interrupted mid-run …]\n\nkeep going"
+        block = messages.history_block([{"role": "user", "content": onboarding},
+                                        {"role": "user", "content": interrupted}])
+        self.assertEqual(block, "Earlier messages in this chat (for context):\n"
+                                "> User: Remember FIG-7.\n> User: keep going")
+
     def test_history_block_keeps_newest_under_cap(self):
         earlier = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i} " + "x" * 995}
                    for i in range(30)]
