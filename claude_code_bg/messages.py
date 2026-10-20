@@ -15,6 +15,7 @@ IMAGE_HINT = re.compile(r'^\[Image attached(?: at)?: [^\n]*\][ \t]*$', re.M)
 HISTORY_HEADER = 'Earlier messages in this chat (for context):'
 HISTORY_CAP = 12000  # characters of carried history, header included
 CUT = '> …'
+ATTACHED = re.compile(r'^\[Attached image: (.+) - open it with the Read tool to see it\.\]$', re.M)
 IMAGE_EXT = {'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp'}
 
 PERSONA = (
@@ -49,6 +50,22 @@ def _attached(path) -> str:
     return f'[Attached image: {path} - open it with the Read tool to see it.]'
 
 
+def images_dir(cwd: str) -> Path:
+    """
+    Return the folder the client saves image attachments in: `<cwd>/tmp/hermes-images`.
+    """
+    return Path(cwd) / 'tmp' / 'hermes-images'
+
+
+def saved_images(prompt: str, cwd: str) -> list[str]:
+    """
+    Return the paths of the images in `prompt` that `save_image` wrote under
+    `images_dir(cwd)` (not the files the user referenced by path), in order.
+    """
+    folder = str(images_dir(cwd)) + os.sep
+    return [path for path in ATTACHED.findall(prompt) if path.startswith(folder)]
+
+
 def save_image(url: str, cwd: str) -> str:
     """
     Return the prompt line for one image URL. A data URL is written once to
@@ -59,7 +76,7 @@ def save_image(url: str, cwd: str) -> str:
         head, _, data = url.partition(',')
         mime = head[5:].split(';')[0] or 'image/png'
         raw = base64.b64decode(data) if ';base64' in head else data.encode()
-        folder = Path(cwd) / 'tmp' / 'hermes-images'
+        folder = images_dir(cwd)
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{hashlib.sha256(raw).hexdigest()[:12]}.{IMAGE_EXT.get(mime, 'png')}"
         if not path.exists():

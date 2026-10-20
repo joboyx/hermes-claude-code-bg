@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 import time
@@ -245,6 +246,16 @@ class ClientTest(unittest.TestCase):
             self.ask(history)
         self.assertEqual(self.text(self.ask(history)), answer_of("hello"))
         self.assertEqual(len(self.launches()), 1)
+
+    def test_saved_images_recorded_for_cleanup(self):
+        data = "data:image/png;base64," + base64.b64encode(b"\x89PNG fake").decode()
+        history = [{"role": "system", "content": "s"},
+                   {"role": "user", "content": [{"type": "text", "text": "look"},
+                                                {"type": "image_url", "image_url": {"url": data}}]}]
+        self.ask(history)
+        [path] = (self.cwd / "tmp" / "hermes-images").iterdir()
+        conv = messages.conversation_key(SESSION, history)
+        self.assertEqual(store.load(conv)["images"], [str(path)])
 
     def test_auxiliary_refused(self):
         with self.assertRaises(AuxiliaryRefused):

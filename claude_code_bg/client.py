@@ -326,6 +326,9 @@ class Client:
         block = messages.history_block(
             messages.unseen_history(history, None if first else state.get('seen')))
         prompt = f'{block}\n\n{newest}' if block else newest
+        images = messages.saved_images(newest, cwd)
+        if images:  # the retention cleanup deletes them with the conversation
+            state['images'] = list(dict.fromkeys(state.get('images', []) + images))
         name = _session_name(conv)
         t0 = time.time()
         if first:

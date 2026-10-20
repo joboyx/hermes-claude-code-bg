@@ -95,6 +95,39 @@ class StoreTest(unittest.TestCase):
             self.assertTrue(lock_path.exists())
         self.assertTrue(lock_path.exists())
 
+    def test_save_keeps_last_20_turns_and_every_sent_turn(self):
+        turns = {f"k{i:02d}": {"state": "done", "sent_at": 1000 + i} for i in range(25)}
+        turns["old-sent"] = {"state": "sent", "sent_at": 1}
+        turns["old-abandoned"] = {"state": "abandoned", "sent_at": 2}
+        store.save("conv-a", {"turns": turns})
+        kept = store.load("conv-a")["turns"]
+        self.assertEqual(sorted(kept), sorted([f"k{i:02d}" for i in range(5, 25)] + ["old-sent"]))
+
+    def test_file_lock_survives_unlink_of_its_file(self):
+        # The cleanup deletes a `.lock` file while it holds the lock. A waiter that opened the
+        # old file before must not end up holding a lock nobody else can see.
+        path = self.home / "claude-code-bg" / "conv" / "conv-a.lock"
+        entered, release = threading.Event(), threading.Event()
+
+        def waiter():
+            with store.FileLock("conv-a"):
+                entered.set()
+                release.wait(10)
+
+        thread = threading.Thread(target=waiter, daemon=True)
+        with store.FileLock("conv-a"):
+            thread.start()
+            time.sleep(0.3)  # the waiter has opened the old file and blocks on it
+            path.unlink()
+        self.assertTrue(entered.wait(5))
+        try:
+            with self.assertRaises(BlockingIOError):
+                with store.FileLock("conv-a", blocking=False):
+                    self.fail("two holders of one conversation lock")
+        finally:
+            release.set()
+            thread.join(5)
+
     def test_event_appends_jsonl(self):
         before = time.time()
         store.event({"kind": "request", "conv": "conv-a"})

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import unittest
@@ -29,7 +30,7 @@ class AdmissionTest(unittest.TestCase):
         set_env(self, CLAUDE_CODE_BG_SLEEP_SCALE="0", CLAUDE_CODE_BG_SETTINGS=None,
                 CLAUDE_CODE_BG_MEMINFO=str(self.meminfo), CLAUDE_CODE_BG_MAX_LIVE=None,
                 CLAUDE_CODE_BG_MAX_CHATS=None, CLAUDE_CODE_BG_MIN_MEM_MB=None,
-                CLAUDE_CODE_BG_IDLE_STOP_S=None)
+                CLAUDE_CODE_BG_IDLE_STOP_S=None, CLAUDE_CODE_BG_RETAIN_DAYS=None)
         self.cwd = self.stub.root / "work"
         self.cwd.mkdir()
 
@@ -217,6 +218,76 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(admission.reap_once(), ["cccc0002"])
         errors = [e for e in self.events() if e.get("kind") == "reaper_error"]
         self.assertEqual([e["conv"] for e in errors], ["conv-a"])
+
+    def test_reap_once_skips_unchanged_reaped_state_without_reading(self):
+        self.session("cccc0001", "conv-idle", done_ago=700)
+        self.assertEqual(admission.reap_once(), ["cccc0001"])
+        path = self.stub.hermes_home / "claude-code-bg" / "conv" / "conv-idle.json"
+        before = path.stat()
+        # Same mtime, unreadable content: a pass that parsed it would log a reaper_error.
+        path.write_text("{bad")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(admission.reap_once(), [])
+        self.assertNotIn("reaper_error", [e.get("kind") for e in self.events()])
+        path.write_text("{bad!")  # a changed file is read again
+        admission.reap_once()
+        self.assertIn("reaper_error", [e.get("kind") for e in self.events()])
+
+    # retention
+
+    def conversation(self, conv: str, days: float, images=()) -> None:
+        """Save a conversation last active `days` ago (no live row) and create its lock file."""
+        store.save(conv, {"claude_id": f"gone-{conv}", "session_id": "s", "cwd": str(self.cwd),
+                          "turns": {}, "last_done_at": time.time() - days * 86400,
+                          "images": [str(p) for p in images]})
+        with store.FileLock(conv):
+            pass
+
+    def conv_files(self) -> list[str]:
+        return sorted(p.name for p in (self.stub.hermes_home / "claude-code-bg" / "conv").iterdir())
+
+    def test_cleanup_deletes_old_conversations_and_their_images(self):
+        set_env(self, CLAUDE_CODE_BG_RETAIN_DAYS=None)
+        folder = self.cwd / "tmp" / "hermes-images"
+        folder.mkdir(parents=True)
+        own, shared, recent = folder / "aaaaaaaaaaaa.png", folder / "bbbbbbbbbbbb.png", folder / "cccccccccccc.png"
+        for path in (own, shared, recent):
+            path.write_bytes(b"png")
+        transcript = self.stub.projects / "stub" / "s.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n")
+        self.conversation("conv-old", 40, [own, shared])
+        self.conversation("conv-recent", 5, [shared, recent])
+        self.conversation("conv-held", 40)
+        self.session("cccc0001", "conv-live", done_ago=40 * 86400)  # its process still runs
+        with store.FileLock("conv-held"):
+            self.assertEqual(admission.cleanup_once(), ["conv-old"])
+        self.assertEqual(self.conv_files(), ["conv-held.json", "conv-held.lock", "conv-live.json",
+                                             "conv-live.lock",
+                                             "conv-recent.json", "conv-recent.lock"])
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), [shared.name, recent.name])
+        self.assertTrue(transcript.exists())
+        self.assertIn("cleanup", [e.get("kind") for e in self.events()])
+
+    def test_cleanup_once_a_day_and_off_switch(self):
+        self.conversation("conv-a", 40)
+        self.assertEqual(admission.maybe_cleanup(), ["conv-a"])
+        self.conversation("conv-b", 40)
+        self.assertEqual(admission.maybe_cleanup(), [])  # ran less than a day ago
+        marker = self.stub.hermes_home / "claude-code-bg" / "cleanup-at"
+        two_days_ago = time.time() - 2 * 86400
+        os.utime(marker, (two_days_ago, two_days_ago))
+        self.assertEqual(admission.maybe_cleanup(), ["conv-b"])
+        set_env(self, CLAUDE_CODE_BG_RETAIN_DAYS="0")
+        os.utime(marker, (two_days_ago, two_days_ago))
+        self.conversation("conv-c", 400)
+        self.assertEqual(admission.maybe_cleanup(), [])
+        self.assertIn("conv-c.json", self.conv_files())
+
+    def test_reap_once_runs_the_cleanup(self):
+        self.conversation("conv-a", 40)
+        admission.reap_once()
+        self.assertEqual(self.conv_files(), [])
 
     def test_reap_once_off_when_idle_zero(self):
         set_env(self, CLAUDE_CODE_BG_IDLE_STOP_S="0")

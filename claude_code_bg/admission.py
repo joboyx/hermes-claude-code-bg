@@ -6,7 +6,8 @@ live rows of `claude agents --json --all` (all kinds) and our own live chats (ro
 the host is full it stops our own idle chats, least recently used first, before it refuses.
 The reaper is one daemon thread per process that stops the process of every conversation
 idle for longer than `idle_stop_seconds()`. The conversation and its session stay; the next
-message resumes them.
+message resumes them. The reaper also runs the retention cleanup at most once a day: it deletes
+the state and saved images of conversations idle for more than `retain_days()`.
 """
 from __future__ import annotations
 
@@ -31,6 +32,11 @@ REAPER_THREAD = 'claude-code-bg-reaper'
 BUSY_REPLY = ('Claude Code is busy on this host right now ({live} live sessions, {mem_mb} MB '
               'free). Send your message again in a few minutes.')
 
+DEFAULT_RETAIN_DAYS = 30.0
+CLEANUP_EVERY_S = 86400.0
+CLEANUP_MARKER = 'cleanup-at'
+
+_UNCHANGED: dict[str, tuple[int, int] | None] = {}  # state file -> stamp with nothing to reap
 _REAPER: dict = {}
 _REAPER_GUARD = threading.Lock()
 
@@ -237,8 +243,10 @@ def reap_once() -> list[str]:
     claude ids. Skips a conversation with a held thread or file lock, a working row, no
     row or a dead pid, and one already reaped since its last activity. A `sent` turn on
     an idle row is reaped: its late reply stays in the transcript. Records `reaped_at` in the state.
+    A state file found with nothing to do until it changes (no session, or reaped since its
+    last activity) is not read again while its inode and mtime stay the same.
     An error in one conversation (a corrupt state file) is logged as a `reaper_error`
-    event and the others are still reaped.
+    event and the others are still reaped. Ends with `maybe_cleanup()`.
     """
     idle_s = idle_stop_seconds()
     if idle_s <= 0:
@@ -247,19 +255,139 @@ def reap_once() -> list[str]:
     rows: dict[str, dict] | None = None
     now = time.time()
     for conv in store.all_conversations():
+        path = store.state_path(conv)
+        stamp = _stamp(path)
+        if stamp is not None and _UNCHANGED.get(str(path)) == stamp:
+            continue
         try:
             peek = store.load(conv)
             done_at = _last_active(peek)
-            if (not peek.get('claude_id') or not done_at or now - done_at < idle_s
+            if (not peek.get('claude_id') or not done_at
                     or (peek.get('reaped_at') or 0) >= done_at):
+                _UNCHANGED[str(path)] = stamp  # nothing to do here until the file changes
+                continue
+            if now - done_at < idle_s:
                 continue
             rows = rows if rows is not None else driver.agents()
             cid = _stop_if_idle(conv, rows, idle_s, 'reaper')
             if cid:
                 stopped.append(cid)
+                _UNCHANGED[str(path)] = _stamp(path)
         except Exception as exc:  # one bad conversation must not stop the others
             store.event({'kind': 'reaper_error', 'conv': conv, 'error': repr(exc)[:300]})
+    maybe_cleanup()
     return stopped
+
+
+def _stamp(path: Path) -> tuple[int, int] | None:
+    """The inode and mtime of a state file (a save replaces the inode), None when it is gone."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return st.st_ino, st.st_mtime_ns
+
+
+def retain_days() -> float:
+    """
+    Return how many idle days a conversation's state and saved images are kept:
+    CLAUDE_CODE_BG_RETAIN_DAYS, else 30. 0 (or below) turns the cleanup off.
+    """
+    raw = os.environ.get('CLAUDE_CODE_BG_RETAIN_DAYS')
+    return max(0.0, float(raw)) if raw else DEFAULT_RETAIN_DAYS
+
+
+def maybe_cleanup() -> list[str]:
+    """
+    Run `cleanup_once()` when it has not run in the last 24 hours (the mtime of
+    `<base>/cleanup-at`, shared by every process on the home); return the deleted
+    conversation keys, else [].
+    """
+    marker = store.base_dir() / CLEANUP_MARKER
+    try:
+        last = marker.stat().st_mtime
+    except FileNotFoundError:
+        last = 0.0
+    if time.time() - last < CLEANUP_EVERY_S:
+        return []
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    return cleanup_once()
+
+
+def cleanup_once() -> list[str]:
+    """
+    Delete every conversation idle for more than `retain_days()` (last activity as in the
+    reaper; the state file's mtime when it has none): its state file, then its `.lock` file
+    (only while this call holds that lock, taken without waiting), and the images it saved
+    under `<cwd>/tmp/hermes-images/` that no kept conversation lists. Skips a conversation
+    whose lock is held or whose process is still alive, and a corrupt state file. Never
+    touches the Claude Code transcripts, rows or ledger records. Returns the deleted keys.
+    """
+    days = retain_days()
+    if days <= 0:
+        return []
+    cutoff = time.time() - days * 86400
+    states = {}
+    for conv in store.all_conversations():
+        try:
+            states[conv] = store.load(conv)
+        except ValueError:
+            continue  # a corrupt state file: the reaper logs it
+    if not any(_idle_since(c, s) < cutoff for c, s in states.items()):
+        return []
+    live = _live_rows()
+    deleted: dict[str, list[str]] = {}
+    for conv in sorted(c for c, s in states.items() if _idle_since(c, s) < cutoff):
+        images = _delete_if_old(conv, live, cutoff)
+        if images is not None:
+            deleted[conv] = images
+    kept = {p for c, s in states.items() if c not in deleted for p in s.get('images') or []}
+    for conv, images in deleted.items():
+        gone = [p for p in images if p not in kept and _is_saved_image(p)]
+        for path in gone:
+            Path(path).unlink(missing_ok=True)
+        store.event({'kind': 'cleanup', 'conv': conv, 'images': len(gone)})
+    return list(deleted)
+
+
+def _idle_since(conv: str, state: dict) -> float:
+    return _last_active(state) or (_stamp_time(store.state_path(conv)))
+
+
+def _stamp_time(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return time.time()
+
+
+def _is_saved_image(path: str) -> bool:
+    """Only files the client saved (`<cwd>/tmp/hermes-images/<file>`) are ever deleted."""
+    parent = Path(path).parent
+    return parent.name == 'hermes-images' and parent.parent.name == 'tmp'
+
+
+def _delete_if_old(conv: str, live: dict[str, dict], cutoff: float) -> list[str] | None:
+    """Delete the state and lock files of `conv` under its locks; return its images, else None."""
+    lock = store.thread_lock(conv)
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        with contextlib.ExitStack() as stack:
+            try:
+                file_lock = stack.enter_context(store.FileLock(conv, blocking=False))
+            except BlockingIOError:
+                return None  # a turn of this conversation runs in another process
+            state = store.load(conv)
+            if _idle_since(conv, state) >= cutoff or state.get('claude_id') in live:
+                return None
+            store.state_path(conv).unlink(missing_ok=True)
+            file_lock.path.unlink(missing_ok=True)
+            _UNCHANGED.pop(str(store.state_path(conv)), None)
+            return list(state.get('images') or [])
+    finally:
+        lock.release()
 
 
 def _reap_tick() -> None:

@@ -46,6 +46,7 @@ Claude Code must already trust the conversation directory (`CLAUDE_CODE_BG_CWD`)
 | `CLAUDE_CODE_BG_MIN_MEM_MB` | `1536` | Minimum `MemAvailable` for a start or resume (Linux only) |
 | `CLAUDE_CODE_BG_INFLIGHT_GRACE_S` | `120` | When Claude has written its final text but background work it started (a dev server, a watcher) keeps running, wait this long, then return the text with the note "(Background work is still running in this session.)" |
 | `CLAUDE_CODE_BG_IDLE_STOP_S` | `600` | Stop the process of a conversation idle this long; the next message resumes it. `0` turns the reaper off. At most 120 while `MemAvailable` is under 1228 MB |
+| `CLAUDE_CODE_BG_RETAIN_DAYS` | `30` | Delete the state of a conversation idle this many days, and the images it saved under `<cwd>/tmp/hermes-images/`. Runs from the idle reaper at most once a day; `0` turns it off. Claude Code transcripts are never deleted |
 | `CLAUDE_PROJECTS` | `~/.claude/projects` | Where the transcripts are read |
 | `CLAUDE_JOBS` | `~/.claude/jobs` | Where the background-job state is read |
 
@@ -66,7 +67,7 @@ Test-only (the unit tests and the smoke suite set them; do not set them in produ
 
 ## State on disk
 
-Under `<hermes home>/claude-code-bg/`: `conv/<conversation>.json` (state) and `.lock`, `events.jsonl` (event log, no message text beyond 90 characters). Under `<hermes home>/claude-watch/`: one ledger record per Claude Code session with `mode: "chat"`.
+Under `<hermes home>/claude-code-bg/`: `conv/<conversation>.json` (state; the last 20 turn records plus any turn still waiting for its reply) and `.lock`, `events.jsonl` (event log, no message text beyond 90 characters), `cleanup-at` (when the retention cleanup last ran). Under `<hermes home>/claude-watch/`: one ledger record per Claude Code session with `mode: "chat"`. Images from chats are saved to `<cwd>/tmp/hermes-images/`. The retention cleanup (`CLAUDE_CODE_BG_RETAIN_DAYS`) deletes old conversation state and images; it runs only while the idle reaper is on. A message to a deleted conversation starts a new Claude session that gets the chat history as a context block.
 
 ## Live smoke suite
 
