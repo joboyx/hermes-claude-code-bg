@@ -33,11 +33,16 @@ Fixture keys:
                        to stderr and exit 1
   jobs_state           JSON written to <CLAUDE_JOBS>/<id>/state.json on each
                        `--bg` launch
+  usage_body           on `-p`: the inner `response` object of the control
+                       response (absent: null)
+  usage_subtype        on `-p`: the control response subtype (default success)
+  usage_raw            on `-p`: print this text instead of a control response
+  usage_delay          on `-p`: seconds to wait before answering
 
 Internal keys (written by the stub, read by `StubEnv`): `_pids` (every child
 pid started, for cleanup), `_exiting` ({id: agents calls left}; cleared for
-an id on `rm` and on a new launch of that id) and `_pid_of` ({id: pid of its
-last launch}).
+an id on `rm` and on a new launch of that id), `_pid_of` ({id: pid of its
+last launch}) and `_requests` (every stdin line a `-p` call read, parsed).
 
 Commands:
 
@@ -50,6 +55,8 @@ Commands:
   stop <id>                    row state `stopped`; status and pid per
                                `exit_after` / `pid_alive_after_stop`
   rm <id>                      remove the row
+  -p ...                       read one control request from stdin and answer
+                               it (stream-json) per the `usage_*` keys
   anything else                exit 1
 """
 from __future__ import annotations
@@ -181,6 +188,22 @@ def rm(fx: dict, cid: str) -> int:
     return 0
 
 
+def print_mode(fx: dict) -> int:
+    line = sys.stdin.readline()
+    request = json.loads(line) if line.strip() else {}
+    fx.setdefault("_requests", []).append(request)
+    if fx.get("usage_delay"):
+        time.sleep(float(fx["usage_delay"]))
+    print(json.dumps({"type": "system", "subtype": "init"}))
+    if "usage_raw" in fx:
+        print(fx["usage_raw"])
+        return 0
+    print(json.dumps({"type": "control_response", "response": {
+        "subtype": fx.get("usage_subtype") or "success",
+        "request_id": request.get("request_id"), "response": fx.get("usage_body")}}))
+    return 0
+
+
 def run(fx: dict, argv: list[str]) -> int:
     fx.setdefault("rows", [])
     if argv[:1] == ["agents"]:
@@ -191,6 +214,8 @@ def run(fx: dict, argv: list[str]) -> int:
         return rm(fx, argv[1])
     if "--bg" in argv:
         return launch(fx, argv)
+    if "-p" in argv:
+        return print_mode(fx)
     print(f"stub claude: unsupported call {argv}", file=sys.stderr)
     return 1
 
