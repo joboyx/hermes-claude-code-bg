@@ -118,13 +118,16 @@ def _live_rows() -> dict[str, dict]:
 
 
 def _check(live: dict[str, dict], own_id: str | None) -> Verdict:
-    # A resume of a conversation whose process is live replaces that process.
+    # A resume of a conversation whose process is live replaces that process: it adds no
+    # session and about no memory (MemAvailable already excludes what that process holds).
     others = [cid for cid in live if cid != own_id]
     chats = [cid for cid in others if _is_chat(cid)]
     mem = mem_available_mb()
+    mem_ok = (own_id in live or mem is None
+              or mem >= _env_int('CLAUDE_CODE_BG_MIN_MEM_MB', DEFAULT_MIN_MEM_MB))
     ok = (len(others) <= _env_int('CLAUDE_CODE_BG_MAX_LIVE', DEFAULT_MAX_LIVE) - 1
           and len(chats) < _env_int('CLAUDE_CODE_BG_MAX_CHATS', DEFAULT_MAX_CHATS)
-          and (mem is None or mem >= _env_int('CLAUDE_CODE_BG_MIN_MEM_MB', DEFAULT_MIN_MEM_MB)))
+          and mem_ok)
     return Verdict(ok=ok, live=len(live), mem_mb=mem)
 
 
@@ -195,7 +198,8 @@ def admit(conv: str) -> Verdict:
     CLAUDE_CODE_BG_MAX_LIVE (default 3) - 1, our other live chats are fewer than
     CLAUDE_CODE_BG_MAX_CHATS (default 2) and, where `MemAvailable` is known,
     it is at least CLAUDE_CODE_BG_MIN_MEM_MB (default 1536). The process of `conv`
-    itself, when live, does not count: the resume replaces it. When not admitted, our
+    itself, when live, does not count and skips the memory check: the resume replaces
+    it. When not admitted, our
     other idle chats are stopped one at a time, least recently used first, and the
     check runs again. A refusal is logged as an `admission` event.
     """

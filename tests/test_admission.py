@@ -132,6 +132,16 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(admission.busy_reply(admission.Verdict(False, 3, 1000)), BUSY)
         self.assertEqual(admission.BUSY_REPLY.format(live=3, mem_mb=1000), BUSY)
 
+    def test_resume_of_live_conversation_skips_memory_gate(self):
+        self.set_mem_mb(1000)
+        self.session("cccc0001", "conv-me", done_ago=60)
+        self.session("bbbb0001", chat=False)
+        self.assertEqual(admission.admit("conv-me"),
+                         admission.Verdict(ok=True, live=2, mem_mb=1000))
+        self.assertEqual(self.stops(), [])
+        # A conversation without a live process still meets the gate.
+        self.assertFalse(admission.admit("conv-new").ok)
+
     def test_resume_of_live_conversation_not_counted_twice(self):
         set_env(self, CLAUDE_CODE_BG_MAX_LIVE="3")
         self.session("cccc0001", "conv-me", done_ago=900)
