@@ -4,8 +4,9 @@ Hermes calls `chat.completions.create(**kwargs)` on a worker thread and `cancel(
 interrupt or stale-call watchdog thread. Each call is one turn: the first turn of a
 conversation dispatches a `claude --bg` session, later turns send a follow-up to the same
 session, and the reply is read from the session transcript. Only the newest user message goes
-to Claude Code; the Claude session keeps its own history. The response never carries
-`tool_calls`, so Hermes ends its turn.
+to Claude Code, plus a quoted block of the messages the Claude session has not seen (the chat
+ran on another provider first, or in between); the Claude session keeps its own history. The
+response never carries `tool_calls`, so Hermes ends its turn.
 
 This module keeps only the turn orchestration and the response objects. The CLI calls are in
 `driver`, the completion rule in `transcript`, keys and prompts in `messages`, state and locks
@@ -203,7 +204,7 @@ class Client:
         hermes_session = kwargs.pop('hermes_session_id', None)
         effort = catalog.effort_of(kwargs.pop('hermes_reasoning_effort', None))
         model = kwargs.get('model') or catalog.DEFAULT_MODEL
-        user_msg, n_user = messages.newest_user(history)
+        _, n_user = messages.newest_user(history)
         conv = messages.conversation_key(hermes_session, history)
         tkey = messages.turn_key(history)
         dicts = [m for m in history if isinstance(m, dict)]
@@ -216,10 +217,10 @@ class Client:
                      'keys': sorted(k for k in kwargs if k not in ('messages', 'tools'))})
         deadline = time.monotonic() + _timeout_of(kwargs.get('timeout'), self.timeout)
         with store.thread_lock(conv), store.FileLock(conv):
-            return self._turn(request, conv, tkey, user_msg, n_user, model, effort,
+            return self._turn(request, conv, tkey, history, n_user, model, effort,
                               hermes_session, deadline, started)
 
-    def _turn(self, request, conv, tkey, user_msg, n_user, model, effort, hermes_session,
+    def _turn(self, request, conv, tkey, history, n_user, model, effort, hermes_session,
               deadline, started):
         """Steps 3-9 of the turn flow, under the conversation's thread and file locks."""
         state = store.load(conv)
@@ -248,7 +249,7 @@ class Client:
             late = self._collect_orphans(state, conv, tkey)
             if late:
                 state['late_replies'] = state.get('late_replies', []) + late
-            turn = self._send(state, conv, tkey, user_msg, n_user, model, effort, hermes_session)
+            turn = self._send(state, conv, tkey, history, n_user, model, effort, hermes_session)
             state['turns'][tkey] = turn
             store.save(conv, state)
             self._fault('after_send', conv, tkey)
@@ -308,19 +309,26 @@ class Client:
             store.event({'kind': 'orphan', 'conv': conv, 'turn': key, 'state': t['state']})
         return late
 
-    def _send(self, state, conv, tkey, user_msg, n_user, model, effort, hermes_session) -> dict:
+    def _send(self, state, conv, tkey, history, n_user, model, effort, hermes_session) -> dict:
         """
         Dispatch on the first turn, else follow up. Updates `state` with the session and
-        returns the `sent` turn record: where to read the reply (session, byte offset,
-        number of earlier prompt matches to skip) and the prompt.
+        the seen marker, and returns the `sent` turn record: where to read the reply
+        (session, byte offset, number of earlier prompt matches to skip) and the exact prompt
+        sent. The prompt is the newest user message; messages of this chat the Claude session
+        has not seen (the chat ran on another provider) go before it as a quoted block.
         """
         cwd = state.get('cwd') or store.default_cwd()
-        prompt = messages.prompt_of(user_msg.get('content'), cwd)
-        if not prompt:
+        user_msg, _ = messages.newest_user(history)
+        newest = messages.prompt_of(user_msg.get('content'), cwd)
+        if not newest:
             raise ValueError('claude-code-bg: the newest user message has no text or image')
+        first = not state.get('claude_id')
+        block = messages.history_block(
+            messages.unseen_history(history, None if first else state.get('seen')))
+        prompt = f'{block}\n\n{newest}' if block else newest
         name = _session_name(conv)
         t0 = time.time()
-        if not state.get('claude_id'):
+        if first:
             Path(cwd).mkdir(parents=True, exist_ok=True)
             persona = messages.persona()
             s = driver.dispatch(prompt, name=name, cwd=cwd, model=model, effort=effort,
@@ -341,7 +349,8 @@ class Client:
         store.event({'kind': 'send', 'conv': conv, 'turn': tkey, 'op': op,
                      'claude_id': s.claude_id, 'session_id': s.session_id, 'offset': offset,
                      'skip': skip, 'n_user': n_user, 'model': model, 'effort': effort,
-                     'prompt': _cut(prompt), 'send_s': send_s})
+                     'prompt': _cut(newest), 'history_chars': len(block), 'send_s': send_s})
+        state['seen'] = messages.seen_marker(history)
         return {'state': 'sent', 'op': op, 'claude_id': s.claude_id, 'session_id': s.session_id,
                 'offset': offset, 'skip': skip, 'prompt': prompt, 'n_user': n_user,
                 'sent_at': t0, 'timing': {'send_s': send_s}}

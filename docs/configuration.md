@@ -61,6 +61,7 @@ Test-only (the unit tests and the smoke suite set them; do not set them in produ
 ## Hermes chat commands
 
 - `/retry`: sends the last user message again to the same Claude session, as a new message. Claude gets a new turn and answers again; the cached reply is not reused. (A Hermes retry of a call that failed or timed out is different: it waits for the turn already sent and never sends it twice.)
+- Switching providers: when a chat moves to this provider after turns on another one (or comes back to it), the messages the Claude session has not seen go before the newest message as a quoted block headed "Earlier messages in this chat (for context):", at most 12,000 characters (the oldest are cut first).
 - `/undo`: removes the last turn from Hermes' history only. It does not rewind the Claude session: Claude still remembers the undone message and its reply. Use `/new` for a clean session.
 
 ## State on disk

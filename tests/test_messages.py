@@ -117,6 +117,57 @@ class MessagesTest(unittest.TestCase):
                  {"role": "user", "content": "c"}]
         self.assertEqual(messages.newest_user(convo), (convo[2], 2))
 
+    def test_history_block_format(self):
+        earlier = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "[Note: model was just switched from a to b] hi\nthere"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "t1"}]},
+            {"role": "tool", "content": "tool output", "tool_call_id": "t1"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": [{"type": "text", "text": "look"}, image_part(DATA_URL)]},
+        ]
+        self.assertEqual(messages.history_block(earlier),
+                         "Earlier messages in this chat (for context):\n"
+                         "> User: hi\n> there\n"
+                         "> Assistant: hello\n"
+                         "> User: look\n> [image]")
+        self.assertEqual(messages.history_block([{"role": "system", "content": "sys"}]), "")
+
+    def test_history_block_keeps_newest_under_cap(self):
+        earlier = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i} " + "x" * 995}
+                   for i in range(30)]
+        block = messages.history_block(earlier)
+        self.assertLessEqual(len(block), messages.HISTORY_CAP)
+        self.assertGreater(len(block), messages.HISTORY_CAP - 1100)
+        lines = block.splitlines()
+        self.assertEqual(lines[:2], ["Earlier messages in this chat (for context):", "> …"])
+        self.assertTrue(lines[-1].startswith("> Assistant: m29 "), lines[-1][:20])
+        self.assertNotIn("m0 ", block)
+        one = messages.history_block([{"role": "user", "content": "y" * 20000}])
+        self.assertLessEqual(len(one), messages.HISTORY_CAP)
+        self.assertTrue(one.splitlines()[1].startswith("> User: …y"), one[:80])
+
+    def test_unseen_history(self):
+        sys_ = {"role": "system", "content": "sys"}
+        u1, a1 = {"role": "user", "content": "one"}, {"role": "assistant", "content": "ans one"}
+        u2, a2 = {"role": "user", "content": "two"}, {"role": "assistant", "content": "other ans"}
+        u3 = {"role": "user", "content": "three"}
+        # First turn: everything before the newest user message.
+        self.assertEqual(messages.unseen_history([sys_, u1, a1, u3], None), [u1, a1])
+        seen = messages.seen_marker([sys_, u1])
+        # Normal follow-up: only Claude's own reply in between, nothing to carry.
+        self.assertEqual(messages.unseen_history([sys_, u1, a1, u3], seen), [])
+        # Another provider answered u2 in between: carry u2 and its reply.
+        self.assertEqual(messages.unseen_history([sys_, u1, a1, u2, a2, u3], seen), [u2, a2])
+        # The same list again (/retry): nothing.
+        seen3 = messages.seen_marker([sys_, u1, a1, u3])
+        self.assertEqual(messages.unseen_history([sys_, u1, a1, u3], seen3), [])
+        # The list was rewritten (compression): find the seen message by its text.
+        summary = {"role": "user", "content": "[summary of earlier turns]"}
+        self.assertEqual(messages.unseen_history([sys_, summary, u1, u2, a2, u3], seen), [u2, a2])
+        # The seen message is gone (/undo): carry nothing, Claude keeps its own history.
+        self.assertEqual(messages.unseen_history([sys_, u2, u3], seen), [])
+
     def test_persona_file_and_off_switch(self):
         set_env(self, CLAUDE_CODE_BG_SYSTEM_PROMPT_FILE=None, CLAUDE_CODE_BG_PERSONA=None)
         self.assertEqual(messages.persona(), messages.PERSONA)

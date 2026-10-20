@@ -160,6 +160,29 @@ class ClientTest(unittest.TestCase):
         stops = [c["argv"] for c in self.stub.calls() if c["argv"][:1] in (["stop"], ["rm"])]
         self.assertEqual(stops, [["stop", "abc12345"], ["rm", "abc12345"]])
 
+    def test_dispatch_carries_earlier_history(self):
+        # The chat ran on another provider first, then switched to this one.
+        history = msgs("[Note: model was just switched from x to y] my name is Ana", "Hi Ana!",
+                       "what is my name?")
+        prompt = ("Earlier messages in this chat (for context):\n"
+                  "> User: my name is Ana\n> Assistant: Hi Ana!\n\nwhat is my name?")
+        self.assertEqual(self.text(self.ask(history)), answer_of(prompt))
+        [argv] = self.launches()
+        self.assertEqual(argv[-2:], ["--", prompt])
+
+    def test_follow_up_carries_only_the_gap(self):
+        self.ask(msgs("first"))
+        # Turns 2 and 3 ran on another provider; the chat switched back for turn 4.
+        history = msgs("first", answer_of("first"), "second", "other answer", "fourth")
+        self.ask(history)
+        _, resume = self.launches()
+        self.assertEqual(resume[-1], "Earlier messages in this chat (for context):\n"
+                                     "> User: second\n> Assistant: other answer\n\nfourth")
+        # The next normal follow-up carries nothing again.
+        self.ask(history + [{"role": "assistant", "content": "x"},
+                            {"role": "user", "content": "fifth"}])
+        self.assertEqual(self.launches()[-1][-2:], ["--", "fifth"])
+
     def test_retry_same_messages_sends_once(self):
         self.stub.fx(append_transcript=PROMPT_ONLY)
         history = msgs("hello")

@@ -12,6 +12,9 @@ from pathlib import Path
 MODEL_NOTE = re.compile(r'^\[Note: model was just switched[^\]]*\]\s*')
 # Hermes' image hint lines (agent/image_routing.build_native_content_parts), one per picture.
 IMAGE_HINT = re.compile(r'^\[Image attached(?: at)?: [^\n]*\][ \t]*$', re.M)
+HISTORY_HEADER = 'Earlier messages in this chat (for context):'
+HISTORY_CAP = 12000  # characters of carried history, header included
+CUT = '> …'
 IMAGE_EXT = {'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp'}
 
 PERSONA = (
@@ -106,6 +109,96 @@ def newest_user(messages: list) -> tuple[dict, int]:
     if not users:
         raise ValueError('claude-code-bg needs a user message')
     return users[-1], len(users)
+
+
+def _history_text(message: dict) -> str:
+    """The text of one earlier message: images as `[image]`, Hermes notes and hints removed."""
+    text = MODEL_NOTE.sub('', text_of(message.get('content')).strip())
+    return re.sub(r'\n{3,}', '\n\n', IMAGE_HINT.sub('', text)).strip()
+
+
+def _newest_index(dicts: list[dict]) -> int:
+    return max(i for i, m in enumerate(dicts) if m.get('role') == 'user')
+
+
+def seen_marker(messages: list) -> dict:
+    """
+    Return what the Claude session has seen of a Hermes message list once its newest user
+    message is sent: that message's index among the dict messages and a hash of its text.
+    Store it after each send; `unseen_history` reads it on the next turn.
+    """
+    dicts = [m for m in messages if isinstance(m, dict)]
+    index = _newest_index(dicts)
+    return {'index': index, 'hash': _sha16(_history_text(dicts[index]))}
+
+
+def unseen_history(messages: list, seen: dict | None) -> list[dict]:
+    """
+    Return the user and assistant messages before the newest user message that the Claude
+    session has not seen. With no `seen` marker (the first turn) that is all of them: the
+    chat may have run on another provider before. Else it is the messages after the seen
+    user message (found at its stored index, else by its text, searching back from the
+    newest), without the first assistant reply after it (Claude's own answer). When the seen
+    message is no longer in the list (`/undo`, a rewrite) it returns []: the Claude session
+    keeps its own history.
+    """
+    dicts = [m for m in messages if isinstance(m, dict)]
+    newest = _newest_index(dicts)
+    if seen is None:
+        start = 0
+    else:
+        def is_seen(i: int) -> bool:
+            return dicts[i].get('role') == 'user' and _sha16(_history_text(dicts[i])) == seen['hash']
+        index = seen.get('index', -1)
+        if 0 <= index <= newest and is_seen(index):
+            start = index + 1
+        else:
+            found = next((i for i in range(newest - 1, -1, -1) if is_seen(i)), None)
+            if found is None:
+                return []
+            start = found + 1
+        if start < newest and dicts[start].get('role') == 'assistant':
+            start += 1
+    return [m for m in dicts[start:newest]
+            if m.get('role') in ('user', 'assistant') and _history_text(m)]
+
+
+def history_block(earlier: list[dict]) -> str:
+    """
+    Return the context block put before the newest message when the Claude session has not
+    seen `earlier` (see `unseen_history`): HISTORY_HEADER, then each user or assistant
+    message as `User: ...` / `Assistant: ...` with every line quoted (`> `). The block is
+    at most HISTORY_CAP characters: the newest messages are kept, a `> …` line marks the cut,
+    and a single message too long on its own keeps its end. Returns '' when there is nothing
+    to show.
+    """
+    entries = [f"{'User' if m.get('role') == 'user' else 'Assistant'}: {_history_text(m)}"
+               for m in earlier if m.get('role') in ('user', 'assistant') and _history_text(m)]
+    if not entries:
+        return ''
+
+    def quote(text: str) -> str:
+        return '\n'.join(f'> {line}' if line else '>' for line in text.split('\n'))
+
+    budget = HISTORY_CAP - len(HISTORY_HEADER) - len(f'\n{CUT}\n')
+    kept: list[str] = []
+    used = 0
+    for entry in reversed(entries):
+        quoted = quote(entry)
+        if used + len(quoted) + 1 > budget:
+            if not kept:  # the newest message alone is too long: keep its end
+                role, _, body = entry.partition(': ')
+                room = budget - len(f'> {role}: …')
+                tail = quote(f'{role}: …{body[max(0, len(body) - room):]}')
+                while len(tail) > budget:
+                    room -= len(tail) - budget
+                    tail = quote(f'{role}: …{body[max(0, len(body) - room):]}')
+                kept.append(tail)
+            break
+        kept.append(quoted)
+        used += len(quoted) + 1
+    lines = [HISTORY_HEADER] + ([CUT] if len(kept) < len(entries) else [])
+    return '\n'.join(lines + kept[::-1])
 
 
 def _sha16(text: str) -> str:
