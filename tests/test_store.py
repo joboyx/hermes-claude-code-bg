@@ -84,6 +84,17 @@ class StoreTest(unittest.TestCase):
         marks = dict(line.split() for line in out.read_text().splitlines())
         self.assertGreaterEqual(float(marks["acquired"]), released)
 
+    def test_file_lock_non_blocking_raises_when_held(self):
+        lock_path = self.home / "claude-code-bg" / "conv" / "conv-a.lock"
+        with store.FileLock("conv-a"):
+            # flock conflicts between two open files, also in one process.
+            with self.assertRaises(BlockingIOError):
+                with store.FileLock("conv-a", blocking=False):
+                    self.fail("entered a held lock")
+        with store.FileLock("conv-a", blocking=False):
+            self.assertTrue(lock_path.exists())
+        self.assertTrue(lock_path.exists())
+
     def test_event_appends_jsonl(self):
         before = time.time()
         store.event({"kind": "request", "conv": "conv-a"})

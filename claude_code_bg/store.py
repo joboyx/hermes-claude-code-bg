@@ -96,17 +96,25 @@ def thread_lock(conv: str) -> threading.Lock:
 class FileLock:
     """
     Cross-process lock of one conversation (`fcntl.flock` on `<base>/conv/<conv>.lock`),
-    for two Hermes processes on one home. Use it as a context manager; it blocks until
-    the lock is free.
+    for two Hermes processes on one home. Use it as a context manager. By default entering
+    blocks until the lock is free; with `blocking=False` entering raises `BlockingIOError`
+    at once when another open file (this process or another one) holds the lock.
+    The `.lock` file stays on disk after release.
     """
 
-    def __init__(self, conv: str):
+    def __init__(self, conv: str, blocking: bool = True):
         self.path = _conv_dir() / f'{conv}.lock'
+        self.blocking = blocking
         self._fh = None
 
     def __enter__(self) -> 'FileLock':
-        self._fh = open(self.path, 'w')
-        fcntl.flock(self._fh, fcntl.LOCK_EX)
+        fh = open(self.path, 'w')
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX if self.blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            fh.close()
+            raise
+        self._fh = fh
         return self
 
     def __exit__(self, *_exc) -> None:
