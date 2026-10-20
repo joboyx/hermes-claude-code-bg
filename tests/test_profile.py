@@ -133,6 +133,21 @@ class ProfileTest(unittest.TestCase):
             self.assertTrue(caps.supports_vision)
             self.assertEqual(caps.context_window, 1_000_000)
 
+    def test_gateway_image_attached_once(self):
+        # A gateway photo: Hermes builds the content parts; the prompt names one file only.
+        from agent.image_routing import build_native_content_parts
+        from claude_code_bg import messages
+        work = Path(tempfile.mkdtemp(prefix="ccbg-image-")).resolve()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        inbox = work / "inbox.png"
+        inbox.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+        content, skipped = build_native_content_parts("Which colour?", [str(inbox)])
+        self.assertEqual(skipped, [])
+        prompt = messages.prompt_of(content, str(work / "cwd"))
+        self.assertNotIn(str(inbox), prompt)
+        self.assertEqual(prompt.count("[Attached image:"), 1)
+        self.assertTrue(prompt.startswith("Which colour?\n\n[Attached image: "), prompt)
+
     def test_classify_cancel_and_aux(self):
         from agent.error_classifier import FailoverReason, classify_api_error
         p = profile()

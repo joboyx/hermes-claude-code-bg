@@ -66,6 +66,26 @@ class MessagesTest(unittest.TestCase):
         self.assertEqual(messages.save_image("file://" + local, self.cwd), line)
         self.assertFalse((Path(self.cwd) / "tmp").exists())
 
+    def test_hermes_image_hints_removed(self):
+        # The shape of Hermes' `agent/image_routing.build_native_content_parts`: the caption,
+        # a blank line, one hint line per image, then the pictures as data URLs.
+        content = [{"type": "text", "text": "What colour is it?\n\n"
+                                            "[Image attached at: /srv/inbox/red.png]\n"
+                                            "[Image attached: https://example.com/b.png]"},
+                   image_part(DATA_URL), image_part("https://example.com/b.png")]
+        prompt = messages.prompt_of(content, self.cwd)
+        [path] = (Path(self.cwd) / "tmp" / "hermes-images").iterdir()
+        self.assertEqual(prompt, "What colour is it?\n\n"
+                                 f"[Attached image: {path} - open it with the Read tool to see it.]"
+                                 "\n\n[Attached image URL: https://example.com/b.png]")
+
+    def test_image_hint_text_kept_without_image_parts(self):
+        content = [{"type": "text", "text": "I typed [Image attached at: /x.png] myself"}]
+        self.assertEqual(messages.prompt_of(content, self.cwd),
+                         "I typed [Image attached at: /x.png] myself")
+        line = "[Image attached at: /x.png]"
+        self.assertEqual(messages.prompt_of([{"type": "text", "text": line}], self.cwd), line)
+
     def test_conversation_key_session_vs_hash(self):
         one = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
         two = [{"role": "user", "content": "other"}]

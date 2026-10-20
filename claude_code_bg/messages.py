@@ -10,6 +10,8 @@ from pathlib import Path
 
 # Hermes prefixes the next user message with this note after `/model`.
 MODEL_NOTE = re.compile(r'^\[Note: model was just switched[^\]]*\]\s*')
+# Hermes' image hint lines (agent/image_routing.build_native_content_parts), one per picture.
+IMAGE_HINT = re.compile(r'^\[Image attached(?: at)?: [^\n]*\][ \t]*$', re.M)
 IMAGE_EXT = {'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp'}
 
 PERSONA = (
@@ -71,16 +73,22 @@ def prompt_of(content, cwd: str) -> str:
     """
     Return the prompt Claude Code gets for one user message: text parts in
     order (joined by a blank line), each image part replaced by its
-    `save_image` line, and the Hermes model-switch note removed.
+    `save_image` line, and the Hermes model-switch note removed. When the
+    message has image parts, Hermes' own hint lines (`[Image attached at:
+    <path>]`, `[Image attached: <url>]`) are removed from the text: the
+    `save_image` line already names each picture once.
     """
     if isinstance(content, str):
         return MODEL_NOTE.sub('', content).strip()
+    parts = [p for p in content or [] if isinstance(p, dict)]
+    has_image = any(p.get('type') == 'image_url' for p in parts)
     out = []
-    for part in content or []:
-        if not isinstance(part, dict):
-            continue
+    for part in parts:
         if part.get('type') == 'text':
-            out.append(part.get('text') or '')
+            text = part.get('text') or ''
+            if has_image:
+                text = re.sub(r'\n{3,}', '\n\n', IMAGE_HINT.sub('', text)).strip()
+            out.append(text)
         elif part.get('type') == 'image_url':
             image = part.get('image_url')
             url = image.get('url', '') if isinstance(image, dict) else str(image or '')
