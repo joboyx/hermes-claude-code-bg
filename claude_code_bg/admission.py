@@ -109,8 +109,16 @@ def _working(row: dict) -> bool:
     return row.get('state') == 'working' and row.get('status') not in ('idle', None)
 
 
-def _has_sent_turn(state: dict) -> bool:
-    return any(t.get('state') == 'sent' for t in state.get('turns', {}).values())
+def _last_active(state: dict) -> float:
+    """
+    Return when the conversation was last active: its last finished turn or the send of a
+    turn still `sent` (a turn that failed or timed out may never finish), 0 when neither.
+    A `sent` turn alone does not block a stop: only a working row does. The transcript
+    keeps a late reply and the client's orphan read delivers it on the next message.
+    """
+    sent = [t.get('sent_at') or 0 for t in state.get('turns', {}).values()
+            if t.get('state') == 'sent']
+    return max([state.get('last_done_at') or 0, *sent])
 
 
 def _live_rows() -> dict[str, dict]:
@@ -143,9 +151,9 @@ def _idle_chats(live: dict[str, dict], conv: str) -> list[tuple[str, str]]:
             continue  # a corrupt state file: not a candidate
         cid = state.get('claude_id')
         row = live.get(cid) if cid else None
-        if row is None or _working(row) or _has_sent_turn(state) or not _is_chat(cid):
+        if row is None or _working(row) or not _is_chat(cid):
             continue
-        found.append((state.get('last_done_at') or 0, other, cid))
+        found.append((_last_active(state), other, cid))
     return [(other, cid) for _, other, cid in sorted(found)]
 
 
@@ -154,9 +162,10 @@ def _stop_if_idle(conv: str, rows: dict[str, dict], idle_s: float | None, by: st
     Stop the process of `conv` when it is idle; return its claude id, else None.
 
     Takes the thread lock and the file lock without waiting: a held lock means a turn is
-    in flight, so the conversation is skipped. Idle means no `sent` turn, a row that is
-    not working and whose pid is alive and, when `idle_s` is set, a last turn that ended
-    more than `idle_s` seconds ago and was not reaped yet.
+    in flight, so the conversation is skipped. Idle means a row that is not working and
+    whose pid is alive (a `sent` turn on an idle row does not count as busy) and, when
+    `idle_s` is set, a last activity (`_last_active`) more than `idle_s` seconds ago that
+    was not reaped yet.
     """
     lock = store.thread_lock(conv)
     if not lock.acquire(blocking=False):
@@ -169,10 +178,10 @@ def _stop_if_idle(conv: str, rows: dict[str, dict], idle_s: float | None, by: st
                 return None  # another process runs a turn of this conversation
             state = store.load(conv)
             cid = state.get('claude_id')
-            if not cid or _has_sent_turn(state):
+            if not cid:
                 return None
             now = time.time()
-            done_at = state.get('last_done_at') or 0
+            done_at = _last_active(state)
             if idle_s is not None and (not done_at or now - done_at < idle_s
                                        or (state.get('reaped_at') or 0) >= done_at):
                 return None
@@ -223,10 +232,11 @@ def admit(conv: str) -> Verdict:
 
 def reap_once() -> list[str]:
     """
-    Stop the process of every conversation whose last turn ended more than
-    `idle_stop_seconds()` ago; return the stopped claude ids. Skips a conversation
-    with a `sent` turn, a held thread or file lock, a working row, no row or a dead
-    pid, and one already reaped since its last turn. Records `reaped_at` in the state.
+    Stop the process of every conversation last active (last finished turn, or the send
+    of a turn still `sent`) more than `idle_stop_seconds()` ago; return the stopped
+    claude ids. Skips a conversation with a held thread or file lock, a working row, no
+    row or a dead pid, and one already reaped since its last activity. A `sent` turn on
+    an idle row is reaped: its late reply stays in the transcript. Records `reaped_at` in the state.
     An error in one conversation (a corrupt state file) is logged as a `reaper_error`
     event and the others are still reaped.
     """
@@ -239,9 +249,9 @@ def reap_once() -> list[str]:
     for conv in store.all_conversations():
         try:
             peek = store.load(conv)
-            done_at = peek.get('last_done_at') or 0
+            done_at = _last_active(peek)
             if (not peek.get('claude_id') or not done_at or now - done_at < idle_s
-                    or (peek.get('reaped_at') or 0) >= done_at or _has_sent_turn(peek)):
+                    or (peek.get('reaped_at') or 0) >= done_at):
                 continue
             rows = rows if rows is not None else driver.agents()
             cid = _stop_if_idle(conv, rows, idle_s, 'reaper')

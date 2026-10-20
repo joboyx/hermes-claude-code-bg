@@ -278,6 +278,23 @@ class ClientTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "max_tokens"):
             self.ask(msgs("write a long essay"))
 
+    def test_next_message_after_failed_turn(self):
+        self.stub.fx(append_transcript=[user_entry("{{prompt}}"),
+                                        assistant_entry("msg-1", "cut off", "max_tokens")])
+        first = msgs("write a long essay")
+        with self.assertRaisesRegex(RuntimeError, "max_tokens"):
+            self.ask(first)
+        self.stub.fx(append_transcript=ANSWER)
+        history = first + [{"role": "user", "content": "shorter please"}]
+        self.assertEqual(self.text(self.ask(history)), answer_of("shorter please"))
+        dispatch, resume = self.launches()
+        self.assertNotIn("--resume", dispatch)
+        self.assertEqual(resume[resume.index("--resume") + 1], SID)
+        state = store.load(messages.conversation_key(SESSION, first))
+        self.assertEqual(state["session_id"], SID)
+        self.assertEqual(state["turns"][messages.turn_key(first)]["state"], "abandoned")
+        self.assertEqual(state["turns"][messages.turn_key(history)]["state"], "done")
+
     def test_busy_reply_when_not_admitted(self):
         self.meminfo.write_text(meminfo(1000))
         response = self.ask(msgs("hello"))

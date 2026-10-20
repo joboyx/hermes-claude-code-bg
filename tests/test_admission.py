@@ -113,7 +113,8 @@ class AdmissionTest(unittest.TestCase):
     def test_admit_refuses_over_chat_cap_when_no_chat_is_idle(self):
         set_env(self, CLAUDE_CODE_BG_MAX_LIVE="10")
         sent = {"k1": {"state": "sent"}}
-        self.session("cccc0001", "conv-a", done_ago=900, turns=sent)
+        self.session("cccc0001", "conv-a", done_ago=900, turns=sent, state="working",
+                     status="busy")
         self.session("cccc0002", "conv-b", done_ago=900, state="working", status="busy")
         verdict = admission.admit("conv-me")
         self.assertEqual(verdict, admission.Verdict(ok=False, live=2, mem_mb=8000))
@@ -145,7 +146,8 @@ class AdmissionTest(unittest.TestCase):
     def test_resume_of_live_conversation_not_counted_twice(self):
         set_env(self, CLAUDE_CODE_BG_MAX_LIVE="3")
         self.session("cccc0001", "conv-me", done_ago=900)
-        self.session("cccc0002", "conv-b", done_ago=900, turns={"k1": {"state": "sent"}})
+        self.session("cccc0002", "conv-b", done_ago=900, turns={"k1": {"state": "sent"}},
+                     state="working", status="busy")
         self.session("bbbb0001", chat=False)
         self.assertEqual(admission.admit("conv-me"),
                          admission.Verdict(ok=True, live=3, mem_mb=8000))
@@ -154,11 +156,38 @@ class AdmissionTest(unittest.TestCase):
         self.assertTrue(admission.admit("conv-new").ok)
         self.assertEqual(self.stops(), ["cccc0001"])
 
+    def test_admit_evicts_idle_chat_with_sent_turn(self):
+        # A turn that failed or timed out stays `sent`; its idle process must not hold a slot.
+        set_env(self, CLAUDE_CODE_BG_MAX_LIVE="10", CLAUDE_CODE_BG_MAX_CHATS="3")
+        sent = {"k1": {"state": "sent", "sent_at": time.time() - 900}}
+        self.session("cccc0001", "conv-stuck", done_ago=900, turns=sent)
+        self.session("cccc0002", "conv-busy", done_ago=950, turns=dict(sent),
+                     state="working", status="busy")
+        self.session("cccc0003", "conv-recent", done_ago=10)
+        verdict = admission.admit("conv-me")
+        self.assertEqual(verdict, admission.Verdict(ok=True, live=2, mem_mb=8000))
+        # The working conversation is older but not a candidate; the idle stuck one goes first.
+        self.assertEqual(self.stops(), ["cccc0001"])
+        self.assertIsNotNone(store.load("conv-stuck").get("reaped_at"))
+
     # reaper
+
+    def test_reap_once_stops_idle_row_with_sent_turn(self):
+        old = {"k1": {"state": "sent", "sent_at": time.time() - 700}}
+        self.session("cccc0001", "conv-stuck", done_ago=900, turns=old)
+        self.session("cccc0002", "conv-first-failed", turns=dict(old))  # never finished a turn
+        self.session("cccc0003", "conv-working", done_ago=900, turns=dict(old),
+                     state="working", status="busy")
+        self.session("cccc0004", "conv-just-sent", done_ago=900,
+                     turns={"k1": {"state": "sent", "sent_at": time.time() - 30}})
+        self.assertEqual(sorted(admission.reap_once()), ["cccc0001", "cccc0002"])
+        self.assertEqual(sorted(self.stops()), ["cccc0001", "cccc0002"])
+        self.assertEqual(admission.reap_once(), [])
 
     def test_reap_once_stops_idle_only(self):
         self.session("cccc0001", "conv-idle", done_ago=700)
-        self.session("cccc0002", "conv-sent", done_ago=700, turns={"k1": {"state": "sent"}})
+        self.session("cccc0002", "conv-sent", done_ago=700, turns={"k1": {"state": "sent"}},
+                     state="working", status="busy")
         self.session("cccc0003", "conv-recent", done_ago=30)
         self.assertEqual(admission.reap_once(), ["cccc0001"])
         self.assertEqual(self.stops(), ["cccc0001"])
