@@ -29,6 +29,7 @@ Fixture keys:
   append_transcript    list of JSONL entries appended to the transcript on each
                        `--bg` launch; "{{prompt}}" in any string becomes the prompt
   fail_resume          on `--resume`: print this text to stderr and exit 1
+  fail_agents          on `agents`: print this text to stderr and exit 1
   fail_dispatch        on a `--bg` launch without `--resume`: print this text
                        to stderr and exit 1
   jobs_state           JSON written to <CLAUDE_JOBS>/<id>/state.json on each
@@ -148,6 +149,9 @@ def launch(fx: dict, argv: list[str]) -> int:
 
 
 def agents(fx: dict) -> int:
+    if fx.get("fail_agents"):
+        print(fx["fail_agents"], file=sys.stderr)
+        return 1
     exiting = fx.setdefault("_exiting", {})
     for cid, left in list(exiting.items()):
         if left > 0:

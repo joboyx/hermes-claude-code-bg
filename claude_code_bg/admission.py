@@ -320,8 +320,9 @@ def cleanup_once() -> list[str]:
     Delete every conversation idle for more than `retain_days()` (last activity as in the
     reaper; the state file's mtime when it has none): its state file, then its `.lock` file
     (only while this call holds that lock, taken without waiting), and the images it saved
-    under `<cwd>/tmp/hermes-images/` that no kept conversation lists. Skips a conversation
-    whose lock is held or whose process is still alive, and a corrupt state file. Never
+    under `<cwd>/tmp/hermes-images/` that no kept conversation lists. Deletes nothing when
+    `claude agents` cannot be read (a `cleanup_skipped` event). Skips a conversation
+    whose lock is held or whose row may still run (`_may_run`), and a corrupt state file. Never
     touches the Claude Code transcripts, rows or ledger records. Returns the deleted keys.
     """
     days = retain_days()
@@ -336,10 +337,16 @@ def cleanup_once() -> list[str]:
             continue  # a corrupt state file: the reaper logs it
     if not any(_idle_since(c, s) < cutoff for c, s in states.items()):
         return []
-    live = _live_rows()
+    try:
+        rows = driver.agents_strict()
+    except driver.DriverError as exc:
+        # The session list cannot be read (a CLI update, a timeout): a missing row would look
+        # like a finished process, so delete nothing this time.
+        store.event({'kind': 'cleanup_skipped', 'error': str(exc)[:300]})
+        return []
     deleted: dict[str, list[str]] = {}
     for conv in sorted(c for c, s in states.items() if _idle_since(c, s) < cutoff):
-        images = _delete_if_old(conv, live, cutoff)
+        images = _delete_if_old(conv, rows, cutoff)
         if images is not None:
             deleted[conv] = images
     kept = {p for c, s in states.items() if c not in deleted for p in s.get('images') or []}
@@ -368,7 +375,19 @@ def _is_saved_image(path: str) -> bool:
     return parent.name == 'hermes-images' and parent.parent.name == 'tmp'
 
 
-def _delete_if_old(conv: str, live: dict[str, dict], cutoff: float) -> list[str] | None:
+def _may_run(row: dict | None) -> bool:
+    """
+    True when an agents row may still have a process: its pid is alive, or the row is not
+    finished (state other than done, stopped or failed, or a status other than idle or null).
+    """
+    if row is None:
+        return False
+    finished = (row.get('state') in ('done', 'stopped', 'failed')
+                and row.get('status') in (None, 'idle'))
+    return driver.pid_alive(row.get('pid')) or not finished
+
+
+def _delete_if_old(conv: str, rows: dict[str, dict], cutoff: float) -> list[str] | None:
     """Delete the state and lock files of `conv` under its locks; return its images, else None."""
     lock = store.thread_lock(conv)
     if not lock.acquire(blocking=False):
@@ -380,7 +399,7 @@ def _delete_if_old(conv: str, live: dict[str, dict], cutoff: float) -> list[str]
             except BlockingIOError:
                 return None  # a turn of this conversation runs in another process
             state = store.load(conv)
-            if _idle_since(conv, state) >= cutoff or state.get('claude_id') in live:
+            if _idle_since(conv, state) >= cutoff or _may_run(rows.get(state.get('claude_id'))):
                 return None
             store.state_path(conv).unlink(missing_ok=True)
             file_lock.path.unlink(missing_ok=True)

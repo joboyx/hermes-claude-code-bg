@@ -269,6 +269,22 @@ class AdmissionTest(unittest.TestCase):
         self.assertTrue(transcript.exists())
         self.assertIn("cleanup", [e.get("kind") for e in self.events()])
 
+    def test_cleanup_skipped_when_session_list_fails(self):
+        # A failed `claude agents` (a CLI update) must not read as "nothing is live".
+        self.conversation("conv-a", 40)
+        self.stub.fx(fail_agents="claude: update in progress")
+        self.assertEqual(admission.cleanup_once(), [])
+        self.assertEqual(self.conv_files(), ["conv-a.json", "conv-a.lock"])
+        self.assertIn("cleanup_skipped", [e.get("kind") for e in self.events()])
+
+    def test_cleanup_keeps_conversation_with_unfinished_row(self):
+        # The row still runs a turn (a background dev server) although its pid is not alive.
+        self.session("cccc0001", "conv-working", done_ago=40 * 86400, pid=999999999,
+                     state="working", status="busy")
+        self.session("cccc0002", "conv-finished", done_ago=40 * 86400, pid=999999999)
+        self.assertEqual(admission.cleanup_once(), ["conv-finished"])
+        self.assertIn("conv-working.json", self.conv_files())
+
     def test_cleanup_once_a_day_and_off_switch(self):
         self.conversation("conv-a", 40)
         self.assertEqual(admission.maybe_cleanup(), ["conv-a"])

@@ -144,6 +144,17 @@ class DriverTest(unittest.TestCase):
     def test_agents_unreadable_is_empty(self):
         self.stub.fx(rows="not a list")
         self.assertEqual(driver.agents(), {})
+        self.stub.fx(rows=[], fail_agents="claude: update in progress")
+        self.assertEqual(driver.agents(), {})
+
+    def test_agents_strict_tells_a_failure_from_an_empty_host(self):
+        self.assertEqual(driver.agents_strict(), {})
+        self.stub.fx(fail_agents="claude: update in progress")
+        with self.assertRaisesRegex(driver.DriverError, "update in progress"):
+            driver.agents_strict()
+        self.stub.fx(fail_agents=None, rows="not a list")
+        with self.assertRaises(driver.DriverError):
+            driver.agents_strict()
 
     def test_pid_alive(self):
         self.assertTrue(driver.pid_alive(os.getpid()))

@@ -122,19 +122,38 @@ def _output(proc: subprocess.CompletedProcess) -> str:
 def agents() -> dict[str, dict]:
     """
     Return the `claude agents --json --all` rows by short id. A failed call
-    or output without a readable JSON list gives {}.
+    or output without a readable JSON list gives {}: use it where an empty
+    answer is safe (it only skips work). A caller that deletes or frees
+    something because a row is absent uses `agents_strict`.
+    """
+    try:
+        return agents_strict()
+    except _ListUnreadable:
+        return {}
+
+
+class _ListUnreadable(DriverError):
+    """`claude agents` exited non-zero or printed no readable JSON list."""
+
+
+def agents_strict() -> dict[str, dict]:
+    """
+    Return the `claude agents --json --all` rows by short id, like `agents`,
+    but raise DriverError when the call fails or its output has no readable
+    JSON list, so a failure is never read as an empty host.
     """
     proc = _claude('agents', '--json', '--all')
     raw = proc.stdout or ''
     start = raw.find('[')
     if proc.returncode != 0 or start < 0:
-        return {}
+        raise _ListUnreadable(f'claude agents failed (exit {proc.returncode}): '
+                              f'{_output(proc)[:300]}')
     try:
         rows = json.loads(raw[start:])
-    except ValueError:
-        return {}
+    except ValueError as exc:
+        raise _ListUnreadable(f'claude agents printed no JSON list: {exc}') from exc
     if not isinstance(rows, list):
-        return {}
+        raise _ListUnreadable('claude agents printed no JSON list')
     return {r['id']: r for r in rows if isinstance(r, dict) and r.get('id')}
 
 
