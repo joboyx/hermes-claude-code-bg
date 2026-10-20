@@ -35,6 +35,9 @@ STOPPED_REPLY = ('Claude Code stopped this turn: it hit a permission prompt that
                  'approve in chat mode, and the prompt could not be denied here. Ask again in a '
                  'way that needs no approval.')
 DEFAULT_TIMEOUT_S = 1800.0
+INFLIGHT_NOTE = '(Background work is still running in this session.)'
+EMPTY_REPLY = '(Claude finished without a text reply.)'
+DEFAULT_INFLIGHT_GRACE_S = 120.0
 POLL_S = 0.5
 ROW_CHECK_POLLS = 20  # x POLL_S: read the agents row about every 10 s
 EVENT_TEXT = 90  # never log more message text than this
@@ -104,6 +107,15 @@ def _timeout_of(value, default: float | None) -> float:
     if number(value):
         return float(value)
     return float(default) if number(default) else DEFAULT_TIMEOUT_S
+
+
+def inflight_grace_seconds() -> float:
+    """
+    Return how long an end_turn with text may stay held back only by in-flight background
+    work before the reply is returned anyway: CLAUDE_CODE_BG_INFLIGHT_GRACE_S, else 120.
+    """
+    raw = os.environ.get('CLAUDE_CODE_BG_INFLIGHT_GRACE_S')
+    return max(0.0, float(raw)) if raw else DEFAULT_INFLIGHT_GRACE_S
 
 
 def _row_finished(row: dict) -> bool:
@@ -252,6 +264,10 @@ class Client:
         return transcript.read_turn(turn['session_id'], turn['claude_id'], turn['offset'],
                                     turn['prompt'], skip_matches=turn.get('skip', 0))
 
+    def _inspect(self, turn: dict) -> transcript.Turn | None:
+        return transcript.inspect_turn(turn['session_id'], turn['claude_id'], turn['offset'],
+                                       turn['prompt'], skip_matches=turn.get('skip', 0))
+
     def _collect_orphans(self, state: dict, conv: str, tkey: str) -> list[str]:
         """
         Read every other turn still `sent` (Hermes gave up on it) once: a finished one is
@@ -317,43 +333,63 @@ class Client:
         anything but a permission prompt raises; a permission prompt is denied with
         DENY_GUIDANCE and noted in the reply; a row that has finished while the last
         assistant entry stopped for another reason than `end_turn` raises (checked twice).
+        Two cases end the wait although the completion rule does not hold: an end_turn with
+        text that only in-flight background work holds back (unchanged for
+        `inflight_grace_seconds()`) returns that text plus INFLIGHT_NOTE, and an end_turn
+        without text on a finished row (seen on two row checks) returns EMPTY_REPLY.
         """
         cid = turn['claude_id']
+        grace = inflight_grace_seconds()
         candidate: transcript.Turn | None = None
+        held_since = 0.0  # when the current in-flight candidate was first seen
         suspect: str | None = None
+        empty_checks = 0
         denied = False
         polls = 0
         while True:
             request.check()
-            done = self._read(turn)
-            if done is not None and candidate is not None and candidate.sig == done.sig:
-                return {'text': done.text + (f'\n\n{DENIED_NOTE}' if denied else ''),
-                        'usage': done.usage, 'n_end_turns': done.n_end_turns, 'denied': denied,
-                        'timing': {**turn.get('timing', {}),
-                                   'total_s': round(time.time() - turn['sent_at'], 2)}}
-            candidate = done
+            seen = self._inspect(turn)
+            same = seen is not None and candidate is not None and candidate.sig == seen.sig \
+                and candidate.blocker == seen.blocker
+            if same and seen.blocker is None:
+                return self._result(turn, seen.text, seen, denied)
+            if seen is not None and seen.blocker == 'in_flight':
+                if not same:
+                    held_since = time.monotonic()
+                elif time.monotonic() - held_since >= grace:
+                    store.event({'kind': 'in_flight_grace', 'conv': conv, 'claude_id': cid,
+                                 'grace_s': grace})
+                    return self._result(turn, f'{seen.text}\n\n{INFLIGHT_NOTE}', seen, denied)
+            if not same:
+                empty_checks = 0
+            candidate = seen
             if time.monotonic() > deadline:
                 store.event({'kind': 'error', 'conv': conv, 'claude_id': cid, 'error': 'timeout'})
                 raise TimeoutError(f'claude-code-bg: no reply from {cid} before the request '
                                    'timeout')
-            if suspect or polls % ROW_CHECK_POLLS == 0:
+            if suspect or empty_checks or polls % ROW_CHECK_POLLS == 0:
                 row = driver.agents().get(cid) or {}
                 state, waiting = row.get('state'), row.get('waitingFor')
                 if state == 'blocked' and waiting == 'permission prompt':
                     ok = driver.deny(cid, DENY_GUIDANCE)
                     store.event({'kind': 'deny', 'conv': conv, 'claude_id': cid, 'ok': ok})
                     if not ok:  # the driver stopped the turn instead
-                        return {'text': STOPPED_REPLY, 'usage': copy.deepcopy(ZERO_USAGE),
-                                'n_end_turns': 0, 'denied': True,
-                                'timing': {**turn.get('timing', {}),
-                                           'total_s': round(time.time() - turn['sent_at'], 2)}}
+                        return self._result(turn, STOPPED_REPLY, None, True)
                     denied = True
                 elif state == 'failed' or (state == 'blocked' and waiting):
                     raise self._error(conv, cid, f'session {cid} is {state}'
                                       + (f' ({waiting})' if waiting else ''))
+                finished = _row_finished(row)
+                if finished and seen is not None and seen.blocker == 'empty':
+                    empty_checks += 1
+                    if empty_checks >= 2:
+                        store.event({'kind': 'empty_reply', 'conv': conv, 'claude_id': cid})
+                        return self._result(turn, EMPTY_REPLY, seen, denied)
+                else:
+                    empty_checks = 0
                 reason = (transcript.last_stop_reason(turn['session_id'], turn['offset'],
                                                       turn['prompt'], turn.get('skip', 0))
-                          if _row_finished(row) else None)
+                          if finished else None)
                 if reason and reason != 'end_turn':
                     if suspect == reason:
                         raise self._error(conv, cid, f'session {cid} ended the turn with '
@@ -363,6 +399,16 @@ class Client:
                     suspect = None
             polls += 1
             driver.nap(POLL_S)
+
+    def _result(self, turn: dict, text: str, seen: transcript.Turn | None, denied: bool) -> dict:
+        """The fields `_turn` merges into the turn record when the wait ends."""
+        if denied and text != STOPPED_REPLY:
+            text += f'\n\n{DENIED_NOTE}'
+        return {'text': text,
+                'usage': seen.usage if seen else copy.deepcopy(ZERO_USAGE),
+                'n_end_turns': seen.n_end_turns if seen else 0, 'denied': denied,
+                'timing': {**turn.get('timing', {}),
+                           'total_s': round(time.time() - turn['sent_at'], 2)}}
 
     def _error(self, conv: str, cid: str, message: str) -> RuntimeError:
         store.event({'kind': 'error', 'conv': conv, 'claude_id': cid, 'error': message})

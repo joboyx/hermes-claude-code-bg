@@ -263,6 +263,25 @@ class ClientTest(unittest.TestCase):
         self.assertIn("denied", text)
         self.assertIn("deny", [e["kind"] for e in self.events()])
 
+    def test_in_flight_work_returns_reply_after_grace(self):
+        # A dev server started in the background keeps inFlight.tasks at 1 for ever.
+        set_env(self, CLAUDE_CODE_BG_INFLIGHT_GRACE_S="0.3")
+        self.stub.fx(jobs_state={"inFlight": {"tasks": 1}})
+        text = self.text(self.ask(msgs("start the dev server")))
+        self.assertEqual(text, answer_of("start the dev server")
+                         + "\n\n(Background work is still running in this session.)")
+
+    def test_in_flight_work_waits_inside_grace(self):
+        set_env(self, CLAUDE_CODE_BG_INFLIGHT_GRACE_S=None)
+        self.stub.fx(jobs_state={"inFlight": {"tasks": 1}})
+        with self.assertRaises(TimeoutError):
+            self.ask(msgs("start the dev server"), timeout=1)
+
+    def test_empty_end_turn_on_finished_row(self):
+        self.stub.fx(append_transcript=[user_entry("{{prompt}}"), assistant_entry("msg-1", "")])
+        text = self.text(self.ask(msgs("touch the file, say nothing")))
+        self.assertEqual(text, "(Claude finished without a text reply.)")
+
     def test_failed_row_raises(self):
         self.stub.fx(append_transcript=PROMPT_ONLY)
         thread, out = self.ask_in_thread(msgs("hello"))

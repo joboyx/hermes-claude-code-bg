@@ -202,6 +202,31 @@ class TranscriptTest(unittest.TestCase):
         self.assertEqual(transcript.path_of(SID), self.path)
         self.assertIsNone(transcript.path_of(""))
 
+    def inspect(self, offset: int = 0, prompt: str = PROMPT):
+        return transcript.inspect_turn(SID, CID, offset, prompt)
+
+    def test_inspect_names_in_flight_blocker(self):
+        self.write(user(PROMPT), assistant("msg_1", [text("Dev server started.")], "end_turn"))
+        self.set_in_flight(1)
+        self.assertIsNone(self.read())
+        turn = self.inspect()
+        self.assertEqual((turn.text, turn.blocker), ("Dev server started.", "in_flight"))
+        self.set_in_flight(0)
+        self.assertIsNone(self.inspect().blocker)
+
+    def test_inspect_names_empty_end_turn(self):
+        self.write(user(PROMPT), assistant("msg_1", [text("  ")], "end_turn", usage(1, 2, 3, 4)))
+        self.assertIsNone(self.read())
+        turn = self.inspect()
+        self.assertEqual((turn.text, turn.blocker), ("", "empty"))
+        self.assertEqual(turn.usage["output"], 4)
+
+    def test_inspect_none_while_running(self):
+        self.write(user(PROMPT), assistant("msg_1", [text("Interim.")], "end_turn"), queue("enqueue"))
+        self.assertIsNone(self.inspect())
+        self.write(queue("dequeue"), user("<task-notification>done</task-notification>"))
+        self.assertIsNone(self.inspect())
+
     def test_in_flight_missing_file_is_zero(self):
         self.assertEqual(transcript.in_flight(CID), 0)
         (self.jobs / CID).mkdir()

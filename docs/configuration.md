@@ -16,6 +16,7 @@ auxiliary:
 ```
 
 - `request_timeout_seconds`: one Claude Code turn can run for many minutes (tools, subagents). When Hermes gives up first, the turn keeps running; the next message delivers its reply first, marked "(Reply to an earlier message that timed out:)".
+- A turn that ends without text (Claude only ran tools) returns "(Claude finished without a text reply.)" instead of waiting for the request timeout.
 - `stale_timeout_seconds`: leave it unset. A stale kill cancels the wait and Hermes retries; the retry waits for the same turn and sends nothing twice, but each kill costs a retry cycle.
 - `auxiliary.*`: this provider refuses auxiliary calls (titles, compression, vision). Route each task to another provider.
 
@@ -43,6 +44,7 @@ Claude Code must already trust the conversation directory (`CLAUDE_CODE_BG_CWD`)
 | `CLAUDE_CODE_BG_MAX_LIVE` | `3` | Live Claude Code sessions on the host (all kinds) above which a start or resume is refused |
 | `CLAUDE_CODE_BG_MAX_CHATS` | `2` | Live chat sessions of this plugin |
 | `CLAUDE_CODE_BG_MIN_MEM_MB` | `1536` | Minimum `MemAvailable` for a start or resume (Linux only) |
+| `CLAUDE_CODE_BG_INFLIGHT_GRACE_S` | `120` | When Claude has written its final text but background work it started (a dev server, a watcher) keeps running, wait this long, then return the text with the note "(Background work is still running in this session.)" |
 | `CLAUDE_CODE_BG_IDLE_STOP_S` | `600` | Stop the process of a conversation idle this long; the next message resumes it. `0` turns the reaper off. At most 120 while `MemAvailable` is under 1228 MB |
 | `CLAUDE_PROJECTS` | `~/.claude/projects` | Where the transcripts are read |
 | `CLAUDE_JOBS` | `~/.claude/jobs` | Where the background-job state is read |

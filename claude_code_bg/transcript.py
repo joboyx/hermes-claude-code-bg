@@ -67,12 +67,15 @@ class Turn:
     `cache_creation`, `output`, `api_calls`, plus `last` = the last API call's three input
     buckets), the number of distinct end_turn messages `n_end_turns`, and `sig`, which
     changes whenever the transcript grows or the last message changes. Accept a turn only
-    when two consecutive polls return the same `sig`.
+    when two consecutive polls return the same `sig`. `blocker` is None for a finished
+    turn; `inspect_turn` also returns a turn that ended with an end_turn but is held back:
+    `in_flight` (background tasks still run) or `empty` (the end_turn has no text).
     """
     text: str
     usage: dict
     n_end_turns: int
     sig: tuple
+    blocker: str | None = None
 
 
 def read_turn(session_id: str, claude_id: str, offset: int, prompt: str,
@@ -88,6 +91,19 @@ def read_turn(session_id: str, claude_id: str, offset: int, prompt: str,
     message can produce several end_turns (an async subagent or background command finishes
     after the first); the reply is the text of the last one.
     """
+    turn = inspect_turn(session_id, claude_id, offset, prompt, skip_matches)
+    return turn if turn is not None and turn.blocker is None else None
+
+
+def inspect_turn(session_id: str, claude_id: str, offset: int, prompt: str,
+                 skip_matches: int = 0) -> Turn | None:
+    """
+    Like `read_turn`, but also return a turn that only one rule holds back, with `blocker`
+    set: `in_flight` when the end_turn has text but the job still has in-flight background
+    tasks (a dev server started in the background never ends), `empty` when the end_turn
+    has no text and nothing else runs. Returns None while the turn still runs for any other
+    reason (no end_turn yet, an unbalanced queue, an empty end_turn with in-flight tasks).
+    """
     entries = _entries(session_id, offset)
     start = _our_start(entries, prompt, skip_matches)
     if start is None:
@@ -97,21 +113,22 @@ def read_turn(session_id: str, claude_id: str, offset: int, prompt: str,
     last = convo[-1] if convo else None
     if last is None or last.get('type') != 'assistant' or _msg(last).get('stop_reason') != 'end_turn':
         return None
+    ops = [e.get('operation') for e in main if e.get('type') == 'queue-operation']
+    if ops.count('enqueue') > ops.count('dequeue') + ops.count('remove'):
+        return None
     last_id = _msg(last).get('id')
     texts = [block.get('text', '') for e in convo if e.get('type') == 'assistant' and _msg(e).get('id') == last_id
              for block in _msg(e).get('content') or []
              if isinstance(block, dict) and block.get('type') == 'text']
-    if not any(t.strip() for t in texts):
+    has_text = any(t.strip() for t in texts)
+    busy = in_flight(claude_id) > 0
+    if busy and not has_text:
         return None
-    ops = [e.get('operation') for e in main if e.get('type') == 'queue-operation']
-    if ops.count('enqueue') > ops.count('dequeue') + ops.count('remove'):
-        return None
-    if in_flight(claude_id):
-        return None
+    blocker = 'in_flight' if busy else (None if has_text else 'empty')
     assistants = [e for e in convo if e.get('type') == 'assistant']
     n_end = len({_msg(e).get('id') for e in assistants if _msg(e).get('stop_reason') == 'end_turn'})
     return Turn(text='\n'.join(texts).strip(), usage=_usage(assistants), n_end_turns=n_end,
-                sig=(len(entries), last_id))
+                sig=(len(entries), last_id), blocker=blocker)
 
 
 def count_prompts(session_id: str, prompt: str) -> int:
