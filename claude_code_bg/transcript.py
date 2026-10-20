@@ -75,25 +75,21 @@ class Turn:
     sig: tuple
 
 
-def read_turn(session_id: str, claude_id: str, offset: int, prompt: str) -> Turn | None:
+def read_turn(session_id: str, claude_id: str, offset: int, prompt: str,
+              skip_matches: int = 0) -> Turn | None:
     """
     Return the finished turn after byte `offset`, or None while it still runs.
 
     Complete means: our user entry is found (not meta, string content that contains the first
-    200 characters of `prompt`); among main-chain entries after it, the last user/assistant
-    entry is an assistant end_turn with non-empty text; every queue enqueue was dequeued or
-    removed; and the job has no in-flight background task. One user message can produce
-    several end_turns (an async subagent or background command finishes after the first);
-    the reply is the text of the last one.
+    200 characters of `prompt`; the first `skip_matches` such entries are ignored, for a
+    copied session whose transcript repeats the history); among main-chain entries after it,
+    the last user/assistant entry is an assistant end_turn with non-empty text; every queue
+    enqueue was dequeued or removed; and the job has no in-flight background task. One user
+    message can produce several end_turns (an async subagent or background command finishes
+    after the first); the reply is the text of the last one.
     """
-    path = path_of(session_id)
-    if path is None:
-        return None
-    with open(path, 'rb') as fh:
-        fh.seek(offset)
-        data = fh.read()
-    entries = _complete_entries(data)
-    start = next((i for i, e in enumerate(entries) if _is_our_prompt(e, prompt)), None)
+    entries = _entries(session_id, offset)
+    start = _our_start(entries, prompt, skip_matches)
     if start is None:
         return None
     main = [e for e in entries[start:] if not e.get('isSidechain')]
@@ -116,6 +112,51 @@ def read_turn(session_id: str, claude_id: str, offset: int, prompt: str) -> Turn
     n_end = len({_msg(e).get('id') for e in assistants if _msg(e).get('stop_reason') == 'end_turn'})
     return Turn(text='\n'.join(texts).strip(), usage=_usage(assistants), n_end_turns=n_end,
                 sig=(len(entries), last_id))
+
+
+def count_prompts(session_id: str, prompt: str) -> int:
+    """
+    Return the number of user entries in the whole transcript that match `prompt` (the same
+    rule as `read_turn`); 0 when there is no transcript. Before reading a copied session, count
+    them in the old transcript and pass the count as `skip_matches`.
+    """
+    return sum(1 for e in _entries(session_id, 0) if _is_our_prompt(e, prompt))
+
+
+def last_stop_reason(session_id: str, offset: int, prompt: str,
+                     skip_matches: int = 0) -> str | None:
+    """
+    Return the `stop_reason` of the last main-chain assistant entry after our user entry
+    (found as in `read_turn`), or None when there is no such entry yet. Together with an
+    agents row that is no longer working, a value other than `end_turn` (`max_tokens`, an
+    API-error message) means the turn ended without a reply.
+    """
+    entries = _entries(session_id, offset)
+    start = _our_start(entries, prompt, skip_matches)
+    if start is None:
+        return None
+    assistants = [e for e in entries[start:]
+                  if e.get('type') == 'assistant' and not e.get('isSidechain')]
+    return _msg(assistants[-1]).get('stop_reason') if assistants else None
+
+
+def _entries(session_id: str, offset: int) -> list[dict]:
+    path = path_of(session_id)
+    if path is None:
+        return []
+    with open(path, 'rb') as fh:
+        fh.seek(offset)
+        data = fh.read()
+    return _complete_entries(data)
+
+
+def _our_start(entries: list[dict], prompt: str, skip_matches: int) -> int | None:
+    """Return the index of our user entry after `skip_matches` earlier matches, else None."""
+    matches = (i for i, e in enumerate(entries) if _is_our_prompt(e, prompt))
+    for _ in range(skip_matches):
+        if next(matches, None) is None:
+            return None
+    return next(matches, None)
 
 
 def _complete_entries(data: bytes) -> list[dict]:

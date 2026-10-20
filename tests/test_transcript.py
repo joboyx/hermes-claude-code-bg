@@ -65,8 +65,8 @@ class TranscriptTest(unittest.TestCase):
                 fh.write(json.dumps(entry) + "\n")
             fh.write(tail)
 
-    def read(self, offset: int = 0, prompt: str = PROMPT):
-        return transcript.read_turn(SID, CID, offset, prompt)
+    def read(self, offset: int = 0, prompt: str = PROMPT, skip: int = 0):
+        return transcript.read_turn(SID, CID, offset, prompt, skip_matches=skip)
 
     def set_in_flight(self, tasks: int) -> None:
         (self.jobs / CID).mkdir(exist_ok=True)
@@ -209,6 +209,32 @@ class TranscriptTest(unittest.TestCase):
         self.assertEqual(transcript.in_flight(CID), 0)
         self.set_in_flight(2)
         self.assertEqual(transcript.in_flight(CID), 2)
+
+    def test_skip_matches_ignores_earlier_copies_of_the_prompt(self):
+        # A copied session repeats the whole history: the same short prompt can be in it already.
+        self.write(user("yes"), assistant("msg_old", [text("Old answer.")], "end_turn"))
+        self.assertEqual(transcript.count_prompts(SID, "yes"), 1)
+        self.assertEqual(self.read(prompt="yes").text, "Old answer.")  # stale without the skip
+        self.assertIsNone(self.read(prompt="yes", skip=1))
+        self.write(user("yes"))
+        self.assertEqual(transcript.count_prompts(SID, "yes"), 2)
+        self.assertIsNone(self.read(prompt="yes", skip=1))
+        self.assertIsNone(transcript.last_stop_reason(SID, 0, "yes", skip_matches=1))
+        self.write(assistant("msg_new", [text("New answer.")], "end_turn"))
+        self.assertEqual(self.read(prompt="yes", skip=1).text, "New answer.")
+        self.assertIsNone(self.read(prompt="yes", skip=2))
+        self.assertEqual(transcript.count_prompts("no-such-session", "yes"), 0)
+
+    def test_last_stop_reason(self):
+        self.assertIsNone(transcript.last_stop_reason(SID, 0, PROMPT))
+        self.write(assistant("msg_0", [text("Earlier.")], "max_tokens"), user(PROMPT))
+        self.assertIsNone(transcript.last_stop_reason(SID, 0, PROMPT))
+        self.write(assistant("msg_1", [tool_use()], "tool_use"), tool_result(),
+                   assistant("msg_side", [text("side")], "end_turn", isSidechain=True))
+        self.assertEqual(transcript.last_stop_reason(SID, 0, PROMPT), "tool_use")
+        self.write(assistant("msg_2", [text("Cut off")], "max_tokens"))
+        self.assertEqual(transcript.last_stop_reason(SID, 0, PROMPT), "max_tokens")
+        self.assertIsNone(self.read())
 
     def test_sig_changes_when_entries_arrive(self):
         self.write(user(PROMPT), assistant("msg_1", [text("Paris.")], "end_turn"))
