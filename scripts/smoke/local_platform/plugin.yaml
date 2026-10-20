@@ -1,0 +1,14 @@
+name: smoke-local-platform
+label: Smoke Local
+kind: platform
+version: 0.1.0
+description: >
+  Test platform for the claude-code-bg live smoke suite: a loopback HTTP endpoint that injects
+  messages into the real gateway pipeline (slash commands, sessions, busy handling) and records
+  every reply to a JSONL outbox.
+author: Joboy Jordan
+requires_env:
+  - name: SMOKE_LOCAL_PORT
+    description: "Loopback port"
+    prompt: "Port"
+    password: false
