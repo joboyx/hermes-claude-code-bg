@@ -13,7 +13,9 @@
 #   SMOKE_PORT, SMOKE_MAX_LIVE   see smoke.py
 #
 # The home is rebuilt on every run from nothing: no file of another Hermes home is copied.
-# Every `smoke-` row of `claude agents` is removed at the end, also after a failure.
+# Every `smoke-` row of `claude agents` is removed at the end, also after a failure or Ctrl-C;
+# rows that cannot be removed make the run exit non-zero. All turns use claude-haiku-5-5 except
+# one short Sonnet turn in the /model case when no second provider is set (see smoke.py).
 set -eu
 : "${SMOKE_CWD:?set SMOKE_CWD to a directory Claude Code trusts}"
 [ -d "$SMOKE_CWD" ] || { echo "error: SMOKE_CWD=$SMOKE_CWD is not a directory" >&2; exit 2; }
@@ -38,9 +40,14 @@ if [ -n "${SMOKE_OTHER_PROVIDER_PLUGIN:-}" ]; then
   export SMOKE_OTHER_PROVIDER
 fi
 
+# The run fails when the suite fails or when the final cleanup still finds `smoke-` rows.
 cleanup() {
-  env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION "$PY" "$REPO/scripts/smoke/smoke.py" cleanup || true
+  status=$?
+  trap - EXIT
+  env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION "$PY" "$REPO/scripts/smoke/smoke.py" cleanup || status=1
+  exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_ENTRYPOINT \
   -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$PY" "$REPO/scripts/smoke/smoke.py" "$@"

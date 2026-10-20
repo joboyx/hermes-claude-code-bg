@@ -9,7 +9,13 @@ Run it through `scripts/smoke/run.sh`, which builds the isolated home and cleans
 In-process cases drive Hermes' own AIAgent + SessionDB (the CLI and gateway code path); each runs
 in its own child process with its own config.yaml and environment. Gateway cases start one real
 `hermes gateway run` with the loopback platform in `local_platform/` and talk to it over HTTP.
-Every case prints PASS, FAIL or SKIP with its numbers; every case's Claude rows are removed.
+Every case prints PASS, FAIL or SKIP with its numbers; every case's Claude rows are removed, and a
+case whose rows cannot be removed is a FAIL.
+
+Every Claude turn uses claude-haiku-5-5, with one exception: without SMOKE_OTHER_PROVIDER the
+/model case switches chat B to claude-sonnet-5-5 for one short turn ("Reply only: BETA-1.") and
+switches it back to Haiku at once. The image and busy cases use their own chats, opted in to
+claude-code-bg with Haiku, so they never inherit that switch.
 
 Environment (run.sh sets the first three):
   HERMES_HOME                  the isolated home (required)
@@ -475,18 +481,32 @@ def wait_reply(chat: str, since: float, match, timeout: float = 150) -> dict | N
 
 
 def sends_with(token: str, since: float) -> list[dict]:
-    # The send event's prompt is the text Claude Code got (the /model note already stripped).
-    return [e for e in events(kind='send', since=since) if token in (e.get('prompt') or '')]
+    """claude-code-bg `send` events since `since` whose full prompt (the text Claude Code got,
+    the /model note already stripped) contains `token`. The event keeps only 90 characters of
+    the prompt, so the full text comes from the turn record in the conversation state."""
+    turns = set()
+    for conv in (home() / 'claude-code-bg' / 'conv').glob('*.json'):
+        for key, turn in json.loads(conv.read_text()).get('turns', {}).items():
+            if (turn.get('sent_at') or 0) >= since and token in (turn.get('prompt') or ''):
+                turns.add((conv.stem, key))
+    return [e for e in events(kind='send', since=since) if (e.get('conv'), e.get('turn')) in turns]
+
+
+def opt_in(chat: str, model: str = MODEL) -> dict | None:
+    """Switch `chat` to claude-code-bg with `model` through the /model command."""
+    return wait_reply(chat, post(chat, f'/model {model} --provider {PROVIDER}'), lambda c: model in c, 60)
 
 
 def case_model():
-    """`/model` per chat: chat B switches to claude-code-bg (or to another of its models), chat A stays."""
+    """`/model` per chat: chat B switches to claude-code-bg (or, without a second provider, to
+    Sonnet for one short turn and back to Haiku), chat A stays on the default."""
     t0 = time.time()
     a, b = 'smoke-chat-a', 'smoke-chat-b'
     target = MODEL if OTHER else 'claude-sonnet-5-5'
     ra = wait_reply(a, post(a, 'Reply only: ALPHA-1.'), lambda c: 'ALPHA-1' in c)
-    rm = wait_reply(b, post(b, f'/model {target} --provider {PROVIDER}'), lambda c: target in c, 60)
+    rm = opt_in(b, target)
     rb = wait_reply(b, post(b, 'Reply only: BETA-1.'), lambda c: 'BETA-1' in c)
+    back = opt_in(b) if not OTHER else True  # the one documented Sonnet turn ends here
     ra2 = wait_reply(a, post(a, 'Reply only: ALPHA-2.'), lambda c: 'ALPHA-2' in c)
     a_reqs, b_reqs = sends_with('ALPHA', t0), sends_with('BETA', t0)
     if OTHER:
@@ -494,9 +514,10 @@ def case_model():
     else:
         routed = (bool(a_reqs) and all(e['model'] == MODEL for e in a_reqs)
                   and bool(b_reqs) and all(e['model'] == target for e in b_reqs))
-    ok = all((ra, rm, rb, ra2)) and routed
+    ok = all((ra, rm, rb, back, ra2)) and routed
     return ok, {'chat_a_default': OTHER or f'{PROVIDER}/{MODEL}', 'chat_b': f'{PROVIDER}/{target}',
-                'chat_a_ccbg_requests': len(a_reqs), 'chat_b_ccbg_requests': len(b_reqs),
+                'chat_b_back_to_haiku': bool(back) if not OTHER else None,
+                'chat_a_ccbg_sends': len(a_reqs), 'chat_b_ccbg_sends': len(b_reqs),
                 'chat_b_models': sorted({e['model'] for e in b_reqs})}
 
 
@@ -512,30 +533,46 @@ def png(path: Path, rgb: tuple[int, int, int]) -> None:
 
 
 def case_image():
-    b = 'smoke-chat-b'
+    """An image attachment reaches Claude Code as a saved file and the colour comes back."""
+    chat = 'smoke-chat-image'
+    question = 'What single colour fills this image? Reply with the colour name only.'
+    t0 = time.time()
+    opted = opt_in(chat)
     image = SMOKE / 'red.png'
     png(image, (255, 0, 0))
     saved = Path(os.environ['SMOKE_CWD']) / 'tmp' / 'hermes-images'
     before = set(saved.glob('*')) if saved.is_dir() else set()
-    t = post(b, 'What single colour fills this image? Reply with the colour name only.', media=[str(image)])
-    r = wait_reply(b, t, lambda c: 'red' in c.lower(), 120)
+    t = post(chat, question, media=[str(image)])
+    r = wait_reply(chat, t, lambda c: 'red' in c.lower(), 120)
     new = (set(saved.glob('*')) if saved.is_dir() else set()) - before
     for path in new:
         path.unlink()  # the copy the client saved for Claude Code's Read tool
-    return r is not None, {'reply_s': round(r['t'] - t, 1) if r else None, 'saved_images': len(new),
-                           'reply': (r.get('content') or '')[:40] if r else None}
+    sent = sends_with(question, t0)
+    ok = bool(opted) and r is not None and len(new) >= 1 and bool(sent) and all(e['model'] == MODEL for e in sent)
+    return ok, {'reply_s': round(r['t'] - t, 1) if r else None, 'saved_images': len(new),
+                'ccbg_sends': len(sent), 'models': sorted({e['model'] for e in sent}),
+                'reply': (r.get('content') or '')[:40] if r else None}
 
 
 def case_busy():
-    b = 'smoke-chat-b'
-    t1 = post(b, 'Run the shell command `sleep 20; echo first-done` with your Bash tool in the foreground, '
-                 'then reply only: FIRST-DONE.')
+    """A second message while the first turn runs: the second reply arrives from claude-code-bg."""
+    chat = 'smoke-chat-busy'
+    t0 = time.time()
+    opted = opt_in(chat)
+    t1 = post(chat, 'Run the shell command `sleep 20; echo first-done` with your Bash tool in the foreground, '
+                    'then reply only: FIRST-DONE.')
     time.sleep(6)
-    t2 = post(b, 'Reply only: SECOND-DONE.')
-    r = wait_reply(b, t2, lambda c: 'SECOND-DONE' in c, 200)
-    first = [x for x in outbox(b, t1) if 'FIRST-DONE' in (x.get('content') or '')]
-    return r is not None, {'second_reply_s': round(r['t'] - t2, 1) if r else None,
-                           'first_reply_seen': bool(first), 'sends': len(outbox(b, t1))}
+    t2 = post(chat, 'Reply only: SECOND-DONE.')
+    early = [x for x in outbox(chat, t1) if x['t'] < t2 and 'FIRST-DONE' in (x.get('content') or '')]
+    r = wait_reply(chat, t2, lambda c: 'SECOND-DONE' in c, 200)
+    sent = sends_with('SECOND-DONE', t0)
+    first = [x for x in outbox(chat, t1) if 'FIRST-DONE' in (x.get('content') or '')]
+    ok = (bool(opted) and r is not None and not early and bool(sent)
+          and all(e['model'] == MODEL for e in sent))
+    return ok, {'second_reply_s': round(r['t'] - t2, 1) if r else None, 'ccbg_sends_second': len(sent),
+                'first_done_before_second': len(early), 'first_reply_seen': bool(first),
+                'sends': len(outbox(chat, t1))}
+
 
 
 IN_PROCESS = {
@@ -646,7 +683,9 @@ def main(argv: list[str]) -> int:
     for name in [n for n in names if n in IN_PROCESS]:
         say('case', name)
         result = run_child(name, run_dir)
-        result['numbers']['rows_left'] = cleanup_rows()
+        result['numbers']['rows_left'] = left = cleanup_rows()
+        if left:
+            result['status'] = 'FAIL'  # every case must leave no smoke- row
         say(result['status'], name, json.dumps(result['numbers'], default=str))
         results.append(result)
     gateway_cases = [n for n in names if n in GATEWAY]
@@ -668,6 +707,8 @@ def main(argv: list[str]) -> int:
             left = cleanup_rows()
             for r in results[-len(gateway_cases):]:
                 r['numbers']['rows_left'] = left
+                if left:
+                    r['status'] = 'FAIL'  # the gateway cases share one cleanup
     (run_dir / 'summary.json').write_text(json.dumps(results, indent=2, default=str))
     report(results)
     return 1 if any(r['status'] == 'FAIL' for r in results) else 0

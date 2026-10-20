@@ -62,4 +62,4 @@ Under `<hermes home>/claude-code-bg/`: `conv/<conversation>.json` (state) and `.
 
 ## Live smoke suite
 
-`scripts/smoke/run.sh` runs the plugin end to end against an isolated Hermes home in `.smoke/` with the real `claude`, `claude-haiku-5-5` and effort `low`. It needs `SMOKE_CWD` (a directory Claude Code trusts). Optional `SMOKE_OTHER_PROVIDER_PLUGIN` points at a second model-provider plugin for the auxiliary and `/model` cases; without it the auxiliary case is skipped. Run it before a Claude Code upgrade: an update can break prompt caching on resume.
+`scripts/smoke/run.sh` runs the plugin end to end against an isolated Hermes home in `.smoke/` with the real `claude`, `claude-haiku-5-5` and effort `low`. It needs `SMOKE_CWD` (a directory Claude Code trusts). Optional `SMOKE_OTHER_PROVIDER_PLUGIN` points at a second model-provider plugin for the auxiliary and `/model` cases. Without it the auxiliary case is skipped, and the `/model` case switches one chat to `claude-sonnet-5-5` for one short turn, then back to Haiku. A case that leaves a `smoke-` row is a FAIL. Run it before a Claude Code upgrade: an update can break prompt caching on resume.
