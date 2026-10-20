@@ -166,13 +166,54 @@ class ClientTest(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             self.ask(history, timeout=0.01)
         self.append(assistant_entry("msg-1", "late hello"))
-        # The retry waits on the `sent` turn instead of sending again ...
-        self.assertEqual(self.text(self.ask(history)), "late hello")
-        # ... and a later duplicate gets the stored reply.
+        # The retry waits on the `sent` turn instead of sending again.
         self.assertEqual(self.text(self.ask(history)), "late hello")
         self.assertEqual(len(self.launches()), 1)
         kinds = [e["kind"] for e in self.events()]
         self.assertIn("dedupe", kinds)
+
+    def test_done_but_undelivered_turn_is_returned(self):
+        # The earlier call finished the turn but raised or was cancelled before it returned.
+        history = msgs("hello")
+        self.ask(history)
+        conv = messages.conversation_key(SESSION, history)
+        state = store.load(conv)
+        state["turns"][messages.turn_key(history)]["delivered"] = False
+        store.save(conv, state)
+        self.assertEqual(self.text(self.ask(history)), answer_of("hello"))
+        self.assertEqual(len(self.launches()), 1)
+        self.assertTrue(store.load(conv)["turns"][messages.turn_key(history)]["delivered"])
+
+    def test_same_messages_after_delivered_reply_is_a_new_generation(self):
+        # Hermes `/retry` (and `/undo` + the same text) sends the same list again after the
+        # reply reached the user: the user wants a new answer, not the cached one.
+        history = msgs("roll a die")
+        self.ask(history)
+        self.stub.fx(append_transcript=[user_entry("{{prompt}}"),
+                                        assistant_entry("msg-2", "rolled again")])
+        self.assertEqual(self.text(self.ask(history)), "rolled again")
+        dispatch, resume = self.launches()
+        self.assertEqual(resume[-2:], ["--", "roll a die"])
+        self.assertIn("regenerate", [e["kind"] for e in self.events()])
+        turns = store.load(messages.conversation_key(SESSION, history))["turns"]
+        self.assertEqual(len(turns), 2)
+        self.assertTrue(all(t["state"] == "done" for t in turns.values()))
+
+    def test_cancel_after_reply_keeps_turn_for_retry(self):
+        history = msgs("hello")
+        self.stub.fx(append_transcript=PROMPT_ONLY)
+        thread, out = self.ask_in_thread(history)
+        self.wait_for(lambda: self.launches(), "the dispatch")
+        conv = messages.conversation_key(SESSION, history)
+        self.wait_for(lambda: store.load(conv)["turns"], "the sent turn")
+        # Cancel while the reply is being written: the wait may end either way, but a
+        # cancelled call must leave the turn undelivered so the retry gets it.
+        self.client.cancel()
+        self.append(assistant_entry("msg-1", "late hello"))
+        thread.join(20)
+        self.assertIn("error", out)
+        self.assertEqual(self.text(self.ask(history)), "late hello")
+        self.assertEqual(len(self.launches()), 1)
 
     def test_fault_after_send_then_retry_sends_once(self):
         set_env(self, CLAUDE_CODE_BG_FAULT="after_send")

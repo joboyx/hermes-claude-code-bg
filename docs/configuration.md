@@ -58,6 +58,11 @@ Test-only (the unit tests and the smoke suite set them; do not set them in produ
 | `CLAUDE_CODE_BG_TMUX` | tmux command used to deny a permission prompt |
 | `CLAUDE_CODE_BG_FAULT` | `after_send` raises once per turn after the send, to test the retry de-duplication |
 
+## Hermes chat commands
+
+- `/retry`: sends the last user message again to the same Claude session, as a new message. Claude gets a new turn and answers again; the cached reply is not reused. (A Hermes retry of a call that failed or timed out is different: it waits for the turn already sent and never sends it twice.)
+- `/undo`: removes the last turn from Hermes' history only. It does not rewind the Claude session: Claude still remembers the undone message and its reply. Use `/new` for a clean session.
+
 ## State on disk
 
 Under `<hermes home>/claude-code-bg/`: `conv/<conversation>.json` (state) and `.lock`, `events.jsonl` (event log, no message text beyond 90 characters). Under `<hermes home>/claude-watch/`: one ledger record per Claude Code session with `mode: "chat"`.

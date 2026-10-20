@@ -226,9 +226,17 @@ class Client:
         if hermes_session:
             state.setdefault('hermes_session', hermes_session)
         turn = state['turns'].get(tkey)
+        if turn and turn.get('state') == 'done' and turn.get('delivered'):
+            # The reply already reached the caller: the same list again is Hermes `/retry` (or
+            # `/undo` + the same text), which asks for a new answer. Keep the old record under
+            # its own key and send the message again.
+            state['turns'][f'{tkey}~{time.time_ns()}'] = state['turns'].pop(tkey)
+            store.event({'kind': 'regenerate', 'conv': conv, 'turn': tkey})
+            turn = None
         if turn and turn.get('state') == 'done':
+            # The earlier call finished the turn but raised or was cancelled before it returned.
             store.event({'kind': 'dedupe', 'conv': conv, 'turn': tkey, 'state': 'done'})
-            return self._response(model, tkey, turn)
+            return self._deliver(request, conv, state, model, tkey, turn)
         if turn and turn.get('state') == 'sent':
             # A Hermes retry of a turn already sent: wait for it, never send it again.
             store.event({'kind': 'dedupe', 'conv': conv, 'turn': tkey, 'state': 'sent'})
@@ -253,11 +261,23 @@ class Client:
             result['late_delivered'] = len(late)
         turn.update(result, state='done', wall_s=round(time.time() - started, 2))
         state['last_done_at'] = time.time()
-        store.save(conv, state)
         store.event({'kind': 'done', 'conv': conv, 'turn': tkey, 'claude_id': turn['claude_id'],
                      'session_id': turn['session_id'], 'timing': turn.get('timing'),
                      'usage': turn['usage'], 'n_end_turns': turn.get('n_end_turns'),
                      'denied': turn.get('denied', False)})
+        return self._deliver(request, conv, state, model, tkey, turn)
+
+    def _deliver(self, request: _Request, conv: str, state: dict, model: str, tkey: str,
+                 turn: dict) -> Object:
+        """
+        Return the response of a `done` turn and mark the turn `delivered`. A call cancelled
+        meanwhile raises instead and leaves the turn undelivered, so the retry gets it.
+        """
+        if request.cancelled.is_set():
+            store.save(conv, state)
+            request.check()
+        turn['delivered'] = True
+        store.save(conv, state)
         return self._response(model, tkey, turn)
 
     def _read(self, turn: dict) -> transcript.Turn | None:
