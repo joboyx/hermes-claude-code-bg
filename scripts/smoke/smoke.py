@@ -14,7 +14,7 @@ case whose rows cannot be removed is a FAIL.
 
 Every Claude turn uses claude-haiku-5-5, with one exception: without SMOKE_OTHER_PROVIDER the
 /model case switches chat B to claude-sonnet-5-5 for one short turn ("Reply only: BETA-1.") and
-switches it back to Haiku at once. The image and busy cases use their own chats, opted in to
+switches it back to Haiku at once. The image, busy and retry cases use their own chats, opted in to
 claude-code-bg with Haiku, so they never inherit that switch.
 
 Environment (run.sh sets the first three):
@@ -429,6 +429,26 @@ def case_retry_after_reap():
                 'dedupe': dedupe, 'reply_tail': text[-40:]}
 
 
+def case_deny():
+    """A permission prompt mid-turn (a PreToolUse hook on Bash that answers "ask", set through
+    CLAUDE_CODE_BG_SETTINGS) is denied through tmux with the guidance; the reply carries the
+    denied note."""
+    hook = home() / 'smoke-ask-hook.sh'
+    decision = {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'ask',
+                                       'permissionDecisionReason': 'smoke: ask for every Bash call'}}
+    hook.write_text(f"#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{json.dumps(decision)}'\n")
+    hook.chmod(0o755)
+    os.environ['CLAUDE_CODE_BG_SETTINGS'] = json.dumps({'hooks': {'PreToolUse': [
+        {'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': str(hook)}]}]}})
+    c = Chat()
+    r = c.turn('Run the shell command `echo hi` with your Bash tool, then reply with its output.')
+    denies = events(c.conv, 'deny')
+    noted = 'hit a permission prompt in this turn' in r['reply']
+    ok = any(e.get('ok') for e in denies) and noted and ops(c.conv) == ['dispatch']
+    return ok, {'deny_events': [e.get('ok') for e in denies], 'denied_note_in_reply': noted,
+                'wall_s': r['wall_s'], 'reply_head': r['reply'][:80]}
+
+
 def case_aux_title():
     if not OTHER:
         return None, {'reason': 'no second provider installed (set SMOKE_OTHER_PROVIDER_PLUGIN in run.sh)'}
@@ -521,6 +541,59 @@ def case_model():
                 'chat_b_models': sorted({e['model'] for e in b_reqs})}
 
 
+def turn_prompts(token: str, since: float) -> list[str]:
+    """The full prompts of claude-code-bg turns sent since `since` that contain `token`."""
+    out = []
+    for conv in (home() / 'claude-code-bg' / 'conv').glob('*.json'):
+        for turn in json.loads(conv.read_text()).get('turns', {}).values():
+            if (turn.get('sent_at') or 0) >= since and token in (turn.get('prompt') or ''):
+                out.append(turn['prompt'])
+    return out
+
+
+def case_retry():
+    """`/retry` re-sends the last message: Claude gets it again as a new turn (a second send to
+    the same session), not the cached reply."""
+    chat = 'smoke-chat-retry'
+    question = ('Reply only: RETRY-1 if this is the first time you see this exact message in this '
+                'chat, else reply only: RETRY-2.')
+    t0 = time.time()
+    opted = opt_in(chat)
+    r1 = wait_reply(chat, post(chat, question), lambda c: 'RETRY-' in c)
+    t = post(chat, '/retry')
+    r2 = wait_reply(chat, t, lambda c: 'RETRY-' in c)
+    sent = sends_with('RETRY-1 if this is the first time', t0)
+    regen = [e for e in events(kind='regenerate', since=t0)]
+    ok = (bool(opted) and r1 is not None and r2 is not None and len(sent) == 2
+          and [e['op'] for e in sent] == ['dispatch', 'follow-up'] and len({e['session_id'] for e in sent}) == 1)
+    return ok, {'sends': [e['op'] for e in sent], 'regenerate_events': len(regen),
+                'first': (r1.get('content') or '')[:20] if r1 else None,
+                'after_retry': (r2.get('content') or '')[:20] if r2 else None}
+
+
+def case_switch():
+    """A chat that ran on another provider switches to claude-code-bg: the first Claude turn
+    gets the earlier messages as a context block and can answer from them."""
+    if not OTHER:
+        return None, {'reason': 'no second provider installed (set SMOKE_OTHER_PROVIDER_PLUGIN in run.sh)'}
+    chat = 'smoke-chat-switch'
+    t0 = time.time()
+    # Wait for the answer itself (not Hermes' home-channel notice): /model is refused while a turn runs.
+    r1 = wait_reply(chat, post(chat, 'Remember the code word FIG-7. Reply only: ok.'),
+                    lambda c: c.strip().strip('.').lower() == 'ok')
+    opted = opt_in(chat)
+    question = 'What was the code word? Reply with it only.'
+    r2 = wait_reply(chat, post(chat, question), lambda c: 'FIG-7' in c)
+    sent = sends_with(question, t0)
+    prompts = turn_prompts(question, t0)
+    carried = [p for p in prompts if p.startswith('Earlier messages in this chat (for context):')
+               and 'FIG-7' in p]
+    ok = (r1 is not None and bool(opted) and r2 is not None and len(sent) == 1
+          and sent[0]['op'] == 'dispatch' and sent[0].get('history_chars', 0) > 0 and bool(carried))
+    return ok, {'history_chars': sent[0].get('history_chars') if sent else None,
+                'block_in_prompt': bool(carried), 'reply': (r2.get('content') or '')[:30] if r2 else None}
+
+
 def png(path: Path, rgb: tuple[int, int, int]) -> None:
     """Write a 64x64 solid-colour PNG."""
     raw = b''.join(b'\x00' + bytes(rgb) * 64 for _ in range(64))
@@ -533,7 +606,8 @@ def png(path: Path, rgb: tuple[int, int, int]) -> None:
 
 
 def case_image():
-    """An image attachment reaches Claude Code as a saved file and the colour comes back."""
+    """An image attachment reaches Claude Code as one saved file (Hermes' own hint line removed)
+    and the colour comes back."""
     chat = 'smoke-chat-image'
     question = 'What single colour fills this image? Reply with the colour name only.'
     t0 = time.time()
@@ -548,9 +622,13 @@ def case_image():
     for path in new:
         path.unlink()  # the copy the client saved for Claude Code's Read tool
     sent = sends_with(question, t0)
-    ok = bool(opted) and r is not None and len(new) >= 1 and bool(sent) and all(e['model'] == MODEL for e in sent)
+    prompts = turn_prompts(question, t0)
+    once = bool(prompts) and all(p.count('[Attached image:') == 1 and '[Image attached' not in p for p in prompts)
+    ok = (bool(opted) and r is not None and len(new) >= 1 and bool(sent) and once
+          and all(e['model'] == MODEL for e in sent))
     return ok, {'reply_s': round(r['t'] - t, 1) if r else None, 'saved_images': len(new),
-                'ccbg_sends': len(sent), 'models': sorted({e['model'] for e in sent}),
+                'ccbg_sends': len(sent), 'image_named_once': once,
+                'models': sorted({e['model'] for e in sent}),
                 'reply': (r.get('content') or '')[:40] if r else None}
 
 
@@ -585,10 +663,12 @@ IN_PROCESS = {
     'watchdog': (case_watchdog, {'providers': {PROVIDER: {'stale_timeout_seconds': 20}}}, {}, 400),
     'reap': (case_reap, {}, {'CLAUDE_CODE_BG_IDLE_STOP_S': '30'}, 400),
     'retry-after-reap': (case_retry_after_reap, {}, {'CLAUDE_CODE_BG_IDLE_STOP_S': '15'}, 400),
+    'deny': (case_deny, {}, {}, 300),
     'aux-title': (case_aux_title, {'auxiliary': {'title_generation': {
         'enabled': True, 'provider': OTHER, 'model': OTHER_MODEL}}} if OTHER else {}, {}, 300),
 }
-GATEWAY = {'model': case_model, 'image': case_image, 'busy': case_busy}
+GATEWAY = {'model': case_model, 'image': case_image, 'busy': case_busy, 'retry': case_retry,
+           'switch': case_switch}
 ORDER = list(IN_PROCESS) + list(GATEWAY)
 
 
@@ -696,7 +776,7 @@ def main(argv: list[str]) -> int:
                 say('case', name)
                 try:
                     ok, numbers = GATEWAY[name]()
-                    status = 'PASS' if ok else 'FAIL'
+                    status = 'SKIP' if ok is None else ('PASS' if ok else 'FAIL')
                 except Exception as exc:  # report the case as FAIL with the reason, go on
                     traceback.print_exc()
                     status, numbers = 'FAIL', {'error': f'{type(exc).__name__}: {exc}'[:400]}

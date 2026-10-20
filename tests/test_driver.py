@@ -163,6 +163,24 @@ class DriverTest(unittest.TestCase):
         self.assertIn("=ccbg-abc12345", calls[-1])
         self.assertNotIn("stop", [c["argv"][0] for c in self.stub.calls()])
 
+    def test_deny_keys_on_claude_code_2_1_304_hook_prompt(self):
+        # The screen `claude attach` showed live (Claude Code 2.1.304) for a PreToolUse hook
+        # that returned permissionDecision "ask". Tab on option 2 opens the reason field
+        # ("2. No, and tell Claude what to do differently"); the typed text goes after it.
+        s = self.dispatch()
+        self.stub.tmux_screen.write_text(
+            " Bash command\n Print hi via echo\n\n echo hi\n\n"
+            " │ Hook PreToolUse:Bash requires confirmation for this command:\n"
+            " │ smoke: ask for every Bash call [settings]\n"
+            " settings.json to update hooks\n"
+            " Do you want to proceed?\n"
+            " ❯ 1. Yes\n"
+            "   2. No\n"
+            " Esc to cancel · Tab to amend\n")
+        self.assertTrue(driver.deny(s.claude_id, GUIDANCE))
+        keys = [c[3:] for c in self.stub.tmux_calls() if c[0] == "send-keys"]
+        self.assertEqual(keys, [["Down"], ["Tab"], ["-l", GUIDANCE], ["Enter"], ["C-z"]])
+
     def test_deny_without_prompt_on_screen_stops(self):
         s = self.dispatch()
         self.stub.tmux_screen.write_text("Claude is working\n")
