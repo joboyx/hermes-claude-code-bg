@@ -133,6 +133,48 @@ class StubClaudeTest(unittest.TestCase):
         self.assertEqual(calls[0]["cwd"], str(self.cwd.resolve()))
         self.assertIn("STUB_FX", calls[0]["env_keys"])
 
+    def test_prev_pid_alive_logged_on_rm_and_resume(self):
+        self.stub.fx(pid_alive_after_stop=5)
+        self.run_claude("--bg", "--name", "n", "--", "hi")
+        self.run_claude("stop", "abc12345")
+        self.run_claude("rm", "abc12345")
+        self.run_claude("--resume", "ffff0000-x", "--bg", "--name", "n", "--", "other")
+        calls = self.stub.calls()
+        self.assertIs(calls[2]["prev_pid_alive"], True)
+        self.assertIsNone(calls[3]["prev_pid_alive"])
+        self.assertNotIn("prev_pid_alive", calls[0])
+
+    def test_fail_dispatch(self):
+        self.stub.fx(fail_dispatch="Workspace not trusted. Run claude in /placeholder once.")
+        done = self.run_claude("--bg", "--name", "n", "--", "hi", check=False)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("Workspace not trusted", done.stderr)
+        self.assertEqual(self.rows(), {})
+
+    def test_rm_and_relaunch_clear_exit_countdown(self):
+        self.stub.fx(exit_after=5)
+        self.run_claude("--bg", "--name", "n", "--", "hi")
+        self.run_claude("stop", "abc12345")
+        self.run_claude("rm", "abc12345")
+        self.assertEqual(self.stub.fx()["_exiting"], {})
+        self.run_claude("stop", "abc12345")  # no row: no countdown
+        self.run_claude("--bg", "--name", "n", "--", "hi")
+        self.run_claude("stop", "abc12345")
+        self.run_claude("--resume", SID, "--bg", "--name", "n", "--", "again")
+        self.assertEqual(self.stub.fx()["_exiting"], {})
+
+    def test_fake_tmux_logs_and_prints_screen(self):
+        env = self.stub.env()
+        out = subprocess.run([self.stub.tmux, "capture-pane", "-t", "=x:", "-p"], env=env,
+                             capture_output=True, text=True, timeout=30).stdout
+        self.assertIn("Do you want to proceed?", out)
+        self.stub.tmux_screen.write_text("plain screen\n")
+        out = subprocess.run([self.stub.tmux, "capture-pane"], env=env,
+                             capture_output=True, text=True, timeout=30).stdout
+        self.assertEqual(out, "plain screen\n")
+        self.assertEqual(self.stub.tmux_calls(),
+                         [["capture-pane", "-t", "=x:", "-p"], ["capture-pane"]])
+
     def test_env_points_at_stub_dirs(self):
         env = self.stub.env()
         self.assertEqual(env["HERMES_HOME"], str(self.stub.hermes_home))

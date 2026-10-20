@@ -5,7 +5,11 @@ the interpreter that runs the tests. Environment:
 
   STUB_FX            path of the fixture JSON (read and rewritten on every call)
   STUB_LOG           path of the call log (one JSON line per call:
-                     {"argv": [...], "cwd": str, "env_keys": [sorted names]})
+                     {"argv": [...], "cwd": str, "env_keys": [sorted names]};
+                     `rm <id>` and `--resume <sid>` calls also carry
+                     "prev_pid_alive": whether the pid of the last launch of
+                     that id (<sid>[:8] for a resume) was still alive, or
+                     null when the stub never launched that id)
   CLAUDE_PROJECTS    transcripts go to <CLAUDE_PROJECTS>/stub/<sessionId>.jsonl
   CLAUDE_JOBS        job state goes to <CLAUDE_JOBS>/<id>/state.json
 
@@ -25,11 +29,15 @@ Fixture keys:
   append_transcript    list of JSONL entries appended to the transcript on each
                        `--bg` launch; "{{prompt}}" in any string becomes the prompt
   fail_resume          on `--resume`: print this text to stderr and exit 1
+  fail_dispatch        on a `--bg` launch without `--resume`: print this text
+                       to stderr and exit 1
   jobs_state           JSON written to <CLAUDE_JOBS>/<id>/state.json on each
                        `--bg` launch
 
 Internal keys (written by the stub, read by `StubEnv`): `_pids` (every child
-pid started, for cleanup) and `_exiting` ({id: agents calls left}).
+pid started, for cleanup), `_exiting` ({id: agents calls left}; cleared for
+an id on `rm` and on a new launch of that id) and `_pid_of` ({id: pid of its
+last launch}).
 
 Commands:
 
@@ -111,9 +119,14 @@ def launch(fx: dict, argv: list[str]) -> int:
             print(f"note: {cid} is still running; started a copy as {fx['copy_as']}")
             cid, sid = fx["copy_as"], fx["copy_session"]
     else:
+        if fx.get("fail_dispatch"):
+            print(fx["fail_dispatch"], file=sys.stderr)
+            return 1
         cid, sid = fx["bg_id"], fx["bg_session"]
     pid = detached(["sleep", CHILD_SECONDS])
     fx.setdefault("_pids", []).append(pid)
+    fx.setdefault("_pid_of", {})[cid] = pid
+    fx.setdefault("_exiting", {}).pop(cid, None)
     fx["rows"] = [r for r in fx["rows"] if r.get("id") != cid] + [{
         "id": cid, "sessionId": sid, "name": name, "kind": "background",
         "state": "done", "status": "idle", "pid": pid, "cwd": os.getcwd()}]
@@ -163,6 +176,7 @@ def stop(fx: dict, cid: str) -> int:
 
 def rm(fx: dict, cid: str) -> int:
     fx["rows"] = [r for r in fx["rows"] if r.get("id") != cid]
+    fx.setdefault("_exiting", {}).pop(cid, None)
     print(f"removed {cid}")
     return 0
 
@@ -184,12 +198,17 @@ def run(fx: dict, argv: list[str]) -> int:
 def main() -> int:
     argv = sys.argv[1:]
     fx_path = Path(os.environ["STUB_FX"])
-    with open(os.environ["STUB_LOG"], "a") as log:
-        log.write(json.dumps({"argv": argv, "cwd": os.getcwd(),
-                              "env_keys": sorted(os.environ)}) + "\n")
     with open(f"{fx_path}.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         fx = json.loads(fx_path.read_text())
+        record = {"argv": argv, "cwd": os.getcwd(), "env_keys": sorted(os.environ)}
+        target = (argv[1] if argv[:1] == ["rm"] and len(argv) > 1
+                  else arg_after(argv, "--resume")[:8])
+        if target:
+            pid = (fx.get("_pid_of") or {}).get(target)
+            record["prev_pid_alive"] = pid_alive(pid) if pid else None
+        with open(os.environ["STUB_LOG"], "a") as log:
+            log.write(json.dumps(record) + "\n")
         code = run(fx, argv)
         tmp = fx_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(fx))

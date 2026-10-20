@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterator
 
 STUB = Path(__file__).resolve().parent / "stub_claude.py"
+FAKE_TMUX = Path(__file__).resolve().parent / "fake_tmux.py"
 DEFAULT_FX = {
     "rows": [],
     "bg_id": "abc12345",
@@ -47,7 +48,10 @@ class StubEnv:
 
     Layout under `root`: `bin/claude` (runs `tests/stub_claude.py` with this
     interpreter), `hermes/` (HERMES_HOME), `projects/` (CLAUDE_PROJECTS),
-    `jobs/` (CLAUDE_JOBS), `fx.json` (fixture) and `calls.jsonl` (call log).
+    `jobs/` (CLAUDE_JOBS), `fx.json` (fixture) and `calls.jsonl` (call log),
+    plus `bin/tmux` (runs `tests/fake_tmux.py`; CLAUDE_CODE_BG_TMUX),
+    `tmux_calls.jsonl` (its call log) and `tmux_screen.txt` (the screen it
+    prints, when a test writes that file).
     Use it as a context manager; exit kills every child the stub started and
     removes the directory.
     """
@@ -56,19 +60,23 @@ class StubEnv:
         self.root = Path(tempfile.mkdtemp(prefix="ccbg-test-")).resolve()
         self.bin = self.root / "bin"
         self.command = str(self.bin / "claude")
+        self.tmux = str(self.bin / "tmux")
         self.hermes_home = self.root / "hermes"
         self.projects = self.root / "projects"
         self.jobs = self.root / "jobs"
         self.fx_path = self.root / "fx.json"
         self.log_path = self.root / "calls.jsonl"
+        self.tmux_log_path = self.root / "tmux_calls.jsonl"
+        self.tmux_screen = self.root / "tmux_screen.txt"
         for path in (self.bin, self.hermes_home, self.projects, self.jobs):
             path.mkdir()
-        wrapper = Path(self.command)
-        wrapper.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} "
-                           f"{shlex.quote(str(STUB))} \"$@\"\n")
-        wrapper.chmod(0o755)
+        for wrapper, script in ((Path(self.command), STUB), (Path(self.tmux), FAKE_TMUX)):
+            wrapper.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} "
+                               f"{shlex.quote(str(script))} \"$@\"\n")
+            wrapper.chmod(0o755)
         self.fx_path.write_text(json.dumps(DEFAULT_FX))
         self.log_path.touch()
+        self.tmux_log_path.touch()
         return self
 
     def __exit__(self, *exc) -> None:
@@ -92,6 +100,9 @@ class StubEnv:
             "CLAUDE_CODE_BG_COMMAND": self.command,
             "STUB_FX": str(self.fx_path),
             "STUB_LOG": str(self.log_path),
+            "CLAUDE_CODE_BG_TMUX": self.tmux,
+            "FAKE_TMUX_LOG": str(self.tmux_log_path),
+            "FAKE_TMUX_SCREEN": str(self.tmux_screen),
         })
         return env
 
@@ -110,9 +121,17 @@ class StubEnv:
 
     def calls(self) -> list[dict]:
         """
-        Return the logged stub calls in order: {"argv", "cwd", "env_keys"}.
+        Return the logged stub calls in order: {"argv", "cwd", "env_keys"},
+        plus "prev_pid_alive" on `rm` and `--resume` calls.
         """
         return [json.loads(line) for line in self.log_path.read_text().splitlines() if line]
+
+    def tmux_calls(self) -> list[list[str]]:
+        """
+        Return the argv of every logged fake `tmux` call, in order.
+        """
+        lines = self.tmux_log_path.read_text().splitlines()
+        return [json.loads(line)["argv"] for line in lines if line]
 
     @contextlib.contextmanager
     def apply_env(self) -> Iterator[None]:
