@@ -21,6 +21,26 @@ DEFAULT_FX = {
 }
 
 
+def set_env(test, **values: str | None) -> None:
+    """
+    Set (str) or unset (None) environment variables for one test and
+    restore the previous values when the test ends (via addCleanup).
+    """
+    for name, value in values.items():
+        test.addCleanup(_restore_env, name, os.environ.get(name))
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+def _restore_env(name: str, previous: str | None) -> None:
+    if previous is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = previous
+
+
 class StubEnv:
     """
     Temp directory with a stub `claude` and the dirs the plugin reads.
