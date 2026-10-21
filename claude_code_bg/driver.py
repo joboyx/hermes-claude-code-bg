@@ -279,9 +279,11 @@ def follow_up(s: Session, prompt: str, *, name: str, cwd: str, model: str,
 def retire(s: Session) -> None:
     """
     When the row of `s` still exists, `stop` it, wait until it has exited
-    (wait_exit) and `rm` it. Raises DriverError when `rm` fails.
+    (wait_exit) and `rm` it. Raises DriverError when `rm` fails or the agents
+    list cannot be read: the caller abandons the session when no row is left,
+    so a failed list must not read as an absent row.
     """
-    row = agents().get(s.claude_id)
+    row = agents_strict().get(s.claude_id)
     if row is None:
         return
     stop(s.claude_id)

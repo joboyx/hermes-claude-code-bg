@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 
-from claude_code_bg import client, messages, store
+from claude_code_bg import client, driver, messages, store
 from claude_code_bg.client import CANCELLED, AuxiliaryRefused, Client
 from tests.support import StubEnv, set_env
 
@@ -412,6 +412,30 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(ledger["state"], "abandoned")
         [send] = [e for e in self.events() if e["kind"] == "send" and e["claude_id"] == COPY_ID]
         self.assertEqual((send["op"], send["offset"], send["skip"]), ("restart", 0, 0))
+
+    def test_follow_up_without_transcript_raises_when_the_session_list_fails(self):
+        # The old session may still run, so a failed list must not read as "no row":
+        # that would abandon it and start a second session next to it.
+        self.stub.fx(append_transcript=[])
+        first = msgs("slow first")
+        with self.assertRaises(TimeoutError):
+            self.ask(first, timeout=0.01)
+        self.stub.fx(append_transcript=ANSWER, bg_id=COPY_ID, bg_session=COPY_SID,
+                     fail_agents="daemon not reachable")
+        history = first + [{"role": "user", "content": "second"}]
+        with self.assertRaisesRegex(driver.DriverError, "claude agents failed"):
+            self.ask(history)
+        self.assertEqual(len(self.launches()), 1)
+        self.assertFalse([c for c in self.stub.calls() if c["argv"][:1] in (["stop"], ["rm"])])
+        state = store.load(messages.conversation_key(SESSION, first))
+        self.assertEqual(state["claude_id"], "abc12345")
+        ledger = json.loads((self.stub.hermes_home / "claude-watch" / "abc12345.json").read_text())
+        self.assertNotEqual(ledger["state"], "abandoned")
+        # Hermes retries the turn once the list reads again.
+        self.stub.fx(fail_agents=None)
+        prompt = "Earlier messages in this chat (for context):\n> User: slow first\n\nsecond"
+        self.assertEqual(self.text(self.ask(history)), answer_of(prompt))
+        self.assertEqual(len(self.launches()), 2)
 
     def test_busy_reply_when_not_admitted(self):
         self.meminfo.write_text(meminfo(1000))
