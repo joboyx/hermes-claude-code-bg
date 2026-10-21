@@ -1,5 +1,43 @@
-This project adapts parts of claude-subscription-directsdk
-(https://github.com/NousResearch/hermes-official-plugins), used under the MIT License:
+This project adapts parts of claude-subscription-directsdk, a plugin in
+NousResearch/hermes-official-plugins (https://github.com/NousResearch/hermes-official-plugins),
+used under the MIT License.
 
-  MIT License
-  Copyright (c) 2026 Nous Research and contributors
+Adapted parts:
+
+- claude_code_bg/usage.py: the `/usage` plan-limits fetch through Claude Code's own
+  `get_usage` control request (from `directsdk_setup.fetch_usage`) and the conversion of
+  the plan-limits body into usage windows and detail lines (from `usage_windows`, with
+  `LIMIT_LABELS`, `LEGACY_WINDOWS`, `_percent` and `_reset_at`).
+- claude_code_bg/__init__.py: `classify_api_error` (the client's cancel error classified as
+  a timeout, passed as a dataclass field of the profile), the `fetch_account_usage` and
+  `get_usage_cost` pattern (an `AccountUsageSnapshot` from `get_usage`; a `CostResult`
+  list-price estimate), and the provider profile layout (`auth_type='external_process'`,
+  a `process://` base URL, `process_command` with `process_command_env_vars`, no `env_vars`).
+- claude_code_bg/client.py: the `Client` outline (the `HERMES_SKIP_TRANSPORT_WRAP` and
+  `HERMES_SKIP_ASYNC_WRAP` flags, `api_key = 'external-process'`, and the check in
+  `create()` that returns a coroutine only when the direct caller is a coroutine inside a
+  running event loop).
+
+The license of claude-subscription-directsdk follows.
+
+MIT License
+
+Copyright (c) 2026 Nous Research and contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -70,7 +70,8 @@ class FetchUsageTest(unittest.TestCase):
     def setUp(self):
         self.stub = self.enterContext(StubEnv())
         self.enterContext(self.stub.apply_env())
-        set_env(self, ANTHROPIC_API_KEY="sk-test-placeholder", CLAUDECODE="1")
+        set_env(self, ANTHROPIC_API_KEY="sk-test-placeholder", CLAUDECODE="1",
+                ANTHROPIC_BASE_URL="https://proxy.example.invalid")
 
     def call(self) -> dict:
         calls = [c for c in self.stub.calls() if "-p" in c["argv"]]

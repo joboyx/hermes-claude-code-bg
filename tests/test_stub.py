@@ -58,8 +58,8 @@ class StubClaudeTest(unittest.TestCase):
         self.assertTrue(pid_alive(row["pid"]))
 
     def test_rows_fixture_is_listed(self):
-        self.stub.fx(rows=[{"id": "board001", "sessionId": "s-1", "state": "working", "status": "busy"}])
-        self.assertEqual(self.rows()["board001"]["state"], "working")
+        self.stub.fx(rows=[{"id": "other001", "sessionId": "s-1", "state": "working", "status": "busy"}])
+        self.assertEqual(self.rows()["other001"]["state"], "working")
 
     def test_stop_then_rm_removes_row(self):
         self.run_claude("--bg", "--name", "n", "--", "hi")

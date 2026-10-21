@@ -3,7 +3,9 @@
 It starts a chat session in the background (`claude --bg`), sends a follow-up
 (stop, wait for the process to exit, rm, `--resume`), denies a permission prompt
 through a short tmux attach, and writes the chat ledger record under
-`<hermes home>/claude-watch/` so hub tooling can tell chat sessions apart.
+`<hermes home>/claude-watch/`: one record per session (`mode: "chat"`) that
+admission reads to count this plugin's sessions, and that other tools on the
+host can read to recognise this plugin's sessions and leave them alone.
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ SETTINGS = {
     'autoCompactWindow': 200000,
 }
 STRIPPED_ENV = ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_ENTRYPOINT',
-                'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN')
+                'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL')
 CALL_TIMEOUT_S = 60
 ROW_TRIES = 60  # x 0.5 s: wait about 30 s for a new row's sessionId
 
@@ -79,8 +81,8 @@ def command() -> str:
 def clean_env() -> dict:
     """
     Return the process environment without the variables that would make
-    Claude Code act as a child session or use an API key instead of the
-    host login (STRIPPED_ENV).
+    Claude Code act as a child session, or use an API key or another endpoint
+    instead of the host login (STRIPPED_ENV).
     """
     return {k: v for k, v in os.environ.items() if k not in STRIPPED_ENV}
 
@@ -378,6 +380,8 @@ def deny(claude_id: str, guidance: str) -> bool:
 
 
 def _ledger_dir() -> Path:
+    # A fixed path outside the plugin's own state dir: other tools on the host read it to
+    # recognise this plugin's sessions, so do not move it.
     return store.hermes_home() / 'claude-watch'
 
 

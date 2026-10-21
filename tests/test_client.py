@@ -1,4 +1,5 @@
-"""Client: the OpenAI-shaped turn flow Hermes calls (spec "Client -> Turn flow")."""
+"""Client: the OpenAI-shaped turn flow Hermes calls (start, resume, retry de-duplication,
+timeouts, cancel, admission and auxiliary refusal)."""
 from __future__ import annotations
 
 import asyncio

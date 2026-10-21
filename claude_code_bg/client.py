@@ -222,7 +222,12 @@ class Client:
 
     def _turn(self, request, conv, tkey, history, n_user, model, effort, hermes_session,
               deadline, started):
-        """Steps 3-9 of the turn flow, under the conversation's thread and file locks."""
+        """
+        Run one turn under the conversation's thread and file locks: load the state, return a
+        reply already recorded for this call, or else (when the turn was not sent yet) check
+        admission and start or resume the Claude session; then wait for the reply, save it
+        and deliver it.
+        """
         state = store.load(conv)
         if hermes_session:
             state.setdefault('hermes_session', hermes_session)

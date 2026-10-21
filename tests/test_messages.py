@@ -184,7 +184,7 @@ class MessagesTest(unittest.TestCase):
     def test_persona_file_and_off_switch(self):
         set_env(self, CLAUDE_CODE_BG_SYSTEM_PROMPT_FILE=None, CLAUDE_CODE_BG_PERSONA=None)
         self.assertEqual(messages.persona(), messages.PERSONA)
-        self.assertTrue(messages.PERSONA.startswith("You are answering a person in a Telegram chat."))
+        self.assertTrue(messages.PERSONA.startswith("You are answering a person in a chat app."))
         self.assertTrue(messages.PERSONA.endswith("ask in plain text and wait for the next message."))
         set_env(self, CLAUDE_CODE_BG_SYSTEM_PROMPT_FILE=str(Path(self.cwd) / "missing.md"))
         self.assertEqual(messages.persona(), messages.PERSONA)

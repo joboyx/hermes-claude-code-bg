@@ -21,10 +21,10 @@ ATTACHED = re.compile(r'^\[Attached image: (.+) - open it with the Read tool to 
 IMAGE_EXT = {'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp'}
 
 PERSONA = (
-    'You are answering a person in a Telegram chat. Hermes relays their messages to you and '
-    'sends your reply back. Keep replies short and easy to read on a phone; Telegram shows '
-    'bold, italics, inline code, code blocks and links, but not tables wider than a phone '
-    'screen. You cannot ask follow-up questions with a picker: ask in plain text and wait for '
+    'You are answering a person in a chat app. Hermes relays their messages to you and '
+    'sends your reply back. Keep replies short and easy to read on a phone; many chat apps '
+    'show bold, italics, inline code, code blocks and links, but not tables wider than a '
+    'phone screen. You cannot ask follow-up questions with a picker: ask in plain text and wait for '
     'the next message.'
 )
 

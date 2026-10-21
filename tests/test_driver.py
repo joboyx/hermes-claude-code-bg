@@ -10,10 +10,10 @@ from tests.support import StubEnv, set_env
 
 SID = "abc12345-0000-4000-8000-000000000001"
 COPY_SID = "def67890-0000-4000-8000-000000000002"
-SPEC_SETTINGS = {"autoMemoryEnabled": False, "remoteControlAtStartup": False,
-                 "skipDangerousModePermissionPrompt": True, "autoCompactWindow": 200000}
+DEFAULT_SETTINGS = {"autoMemoryEnabled": False, "remoteControlAtStartup": False,
+                    "skipDangerousModePermissionPrompt": True, "autoCompactWindow": 200000}
 STRIPPED = ("CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT",
-            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
 GUIDANCE = ("Not allowed in chat mode: no one can approve this prompt. Choose a safer way, "
             "or explain in your reply what you need and stop.")
 
@@ -53,17 +53,17 @@ class DriverTest(unittest.TestCase):
                             ("--effort", "low"), ("--permission-mode", "bypassPermissions"),
                             ("--disallowedTools", "AskUserQuestion")):
             self.assertEqual(argv[argv.index(flag) + 1], value, flag)
-        self.assertEqual(json.loads(argv[argv.index("--settings") + 1]), SPEC_SETTINGS)
+        self.assertEqual(json.loads(argv[argv.index("--settings") + 1]), DEFAULT_SETTINGS)
         self.assertEqual(argv[-2:], ["--", "hello there"])
         self.assertNotIn("--append-system-prompt", argv)
         self.assertEqual(call["cwd"], str(self.cwd))
         for name in STRIPPED:
             self.assertNotIn(name, call["env_keys"])
 
-    def test_settings_env_merges_over_spec(self):
+    def test_settings_env_merges_over_defaults(self):
         set_env(self, CLAUDE_CODE_BG_SETTINGS='{"autoCompactWindow": 100000, "x": 1}')
         self.assertEqual(driver.launch_settings(),
-                         {**SPEC_SETTINGS, "autoCompactWindow": 100000, "x": 1})
+                         {**DEFAULT_SETTINGS, "autoCompactWindow": 100000, "x": 1})
 
     def test_dispatch_persona_flag_only_on_dispatch(self):
         s = self.dispatch(persona="Be brief.")

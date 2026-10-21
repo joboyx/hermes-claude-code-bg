@@ -16,7 +16,8 @@ A Hermes Agent model-provider plugin that answers each Hermes chat with a Claude
 Every launch runs `claude` with `--permission-mode bypassPermissions`, as the host user: Claude Code can read and write that user's files, run any shell command and use the host's Claude Code login without asking. Anyone who can post in a chat that uses this provider gets that access.
 
 - Let only the operator reach the Hermes gateway: set a user allowlist on every platform that can route to this provider, and do not opt in group chats that other people can post in.
-- The safer setup is a sandboxed wrapper in `CLAUDE_CODE_BG_COMMAND` (a container, a separate user, or `systemd-run` with limits) that runs the unmodified `claude` with only the files it needs.
+- Content that Claude reads (web pages, files, images, tool output) can also carry instructions, and Claude can follow them with the same full access (prompt injection). For anything beyond a single trusted operator, use the sandboxed wrapper below.
+- The recommended setup is a sandboxed wrapper in `CLAUDE_CODE_BG_COMMAND` (a container, a separate user, or `systemd-run` with limits) that runs the unmodified `claude` with only the files it needs.
 - A permission prompt that still shows up (from a hook or a managed setting) is denied, not approved; no one can approve it from the chat.
 
 ## Install and enable

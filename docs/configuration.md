@@ -5,7 +5,8 @@
 Every launch runs `claude` with `--permission-mode bypassPermissions`, as the host user: Claude Code can read and write that user's files, run any shell command and use the host's Claude Code login without asking. Anyone who can post in a chat that uses this provider gets that access.
 
 - Let only the operator reach the Hermes gateway: set a user allowlist on every platform that can route to this provider, and do not opt in group chats that other people can post in.
-- The safer setup is a sandboxed wrapper in `CLAUDE_CODE_BG_COMMAND` (a container, a separate user, or `systemd-run` with limits) that runs the unmodified `claude` with only the files it needs.
+- Content that Claude reads (web pages, files, images, tool output) can also carry instructions, and Claude can follow them with the same full access (prompt injection). For anything beyond a single trusted operator, use the sandboxed wrapper below.
+- The recommended setup is a sandboxed wrapper in `CLAUDE_CODE_BG_COMMAND` (a container, a separate user, or `systemd-run` with limits) that runs the unmodified `claude` with only the files it needs.
 - A permission prompt that still shows up (from a hook or a managed setting) is denied, not approved; no one can approve it from the chat.
 
 ## Hermes configuration
@@ -47,7 +48,7 @@ Claude Code must already trust the conversation directory (`CLAUDE_CODE_BG_CWD`)
 | `CLAUDE_CODE_BG_SETTINGS` | none | JSON object merged into the `--settings` of every launch; its keys win |
 | `CLAUDE_CODE_BG_NAME_PREFIX` | `hb-` | Prefix of the session names in `claude agents` |
 | `CLAUDE_CODE_BG_EFFORT` | `high` | Effort when Hermes sends none |
-| `CLAUDE_CODE_BG_SYSTEM_PROMPT_FILE` | none | File with the first-turn persona (replaces the default text) |
+| `CLAUDE_CODE_BG_SYSTEM_PROMPT_FILE` | none | File with the first-turn persona (replaces the default text, which is written for any chat app read on a phone); use it for a platform-specific persona |
 | `CLAUDE_CODE_BG_PERSONA` | on | `0` turns the default persona off |
 | `CLAUDE_CODE_BG_MAX_LIVE` | `3` | Live Claude Code sessions on the host (all kinds) above which a start or resume is refused |
 | `CLAUDE_CODE_BG_MAX_CHATS` | `2` | Live chat sessions of this plugin |
@@ -57,6 +58,8 @@ Claude Code must already trust the conversation directory (`CLAUDE_CODE_BG_CWD`)
 | `CLAUDE_CODE_BG_RETAIN_DAYS` | `30` | Delete the state of a conversation idle this many days, and the images it saved under `<cwd>/tmp/hermes-images/`. Runs from the idle reaper at most once a day; `0` turns it off. Claude Code transcripts are never deleted |
 | `CLAUDE_PROJECTS` | `~/.claude/projects` | Where the transcripts are read |
 | `CLAUDE_JOBS` | `~/.claude/jobs` | Where the background-job state is read |
+
+Every `claude` launch removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` and `CLAUDE_CODE_ENTRYPOINT` from its environment, so Claude Code uses only the host's normal login and endpoint and does not act as a child session.
 
 Test-only (the unit tests and the smoke suite set them; do not set them in production):
 
@@ -75,7 +78,7 @@ Test-only (the unit tests and the smoke suite set them; do not set them in produ
 
 ## State on disk
 
-Under `<hermes home>/claude-code-bg/`: `conv/<conversation>.json` (state; the last 20 turn records plus any turn still waiting for its reply) and `.lock`, `events.jsonl` (event log, no message text beyond 90 characters), `cleanup-at` (when the retention cleanup last ran). Under `<hermes home>/claude-watch/`: one ledger record per Claude Code session with `mode: "chat"`. Images from chats are saved to `<cwd>/tmp/hermes-images/`. The retention cleanup (`CLAUDE_CODE_BG_RETAIN_DAYS`) deletes old conversation state and images; it runs only while the idle reaper is on. A message to a deleted conversation starts a new Claude session that gets the chat history as a context block.
+Under `<hermes home>/claude-code-bg/`: `conv/<conversation>.json` (state; the last 20 turn records plus any turn still waiting for its reply) and `.lock`, `events.jsonl` (event log, no message text beyond 90 characters), `cleanup-at` (when the retention cleanup last ran). Under `<hermes home>/claude-watch/`: `<claude id>.json`, one ledger record per Claude Code session that this plugin started, with `mode: "chat"`. Admission reads it to count this plugin's live chats. Other tools on the host can read it to recognise this plugin's sessions in `claude agents` and leave them alone, so the path stays fixed. Images from chats are saved to `<cwd>/tmp/hermes-images/`. The retention cleanup (`CLAUDE_CODE_BG_RETAIN_DAYS`) deletes old conversation state and images; it runs only while the idle reaper is on. A message to a deleted conversation starts a new Claude session that gets the chat history as a context block.
 
 ## Live smoke suite
 

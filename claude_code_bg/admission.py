@@ -106,7 +106,7 @@ def _is_chat(claude_id: str) -> bool:
     try:
         record = json.loads(path.read_text())
     except (FileNotFoundError, ValueError):
-        # No readable record: the row belongs to someone else (board, terminal).
+        # No readable record: the row belongs to someone else (other agents, terminal sessions).
         return False
     return isinstance(record, dict) and record.get('mode') == 'chat'
 
