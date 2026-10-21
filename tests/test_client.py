@@ -389,6 +389,30 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(state["turns"][messages.turn_key(first)]["state"], "abandoned")
         self.assertEqual(state["turns"][messages.turn_key(history)]["state"], "done")
 
+    def test_follow_up_without_transcript_starts_a_new_session(self):
+        # Claude Code saves the transcript some seconds after the start. A turn interrupted
+        # before that leaves a session id that `--resume` cannot find.
+        self.stub.fx(append_transcript=[])
+        first = msgs("slow first")
+        with self.assertRaises(TimeoutError):
+            self.ask(first, timeout=0.01)
+        self.stub.fx(append_transcript=ANSWER, bg_id=COPY_ID, bg_session=COPY_SID)
+        history = first + [{"role": "user", "content": "second"}]
+        prompt = "Earlier messages in this chat (for context):\n> User: slow first\n\nsecond"
+        self.assertEqual(self.text(self.ask(history)), answer_of(prompt))
+        _, restart = self.launches()
+        self.assertNotIn("--resume", restart)
+        self.assertEqual(restart[-2:], ["--", prompt])
+        self.assertIn("--append-system-prompt", restart)
+        stops = [c["argv"] for c in self.stub.calls() if c["argv"][:1] in (["stop"], ["rm"])]
+        self.assertEqual(stops, [["stop", "abc12345"], ["rm", "abc12345"]])
+        state = store.load(messages.conversation_key(SESSION, first))
+        self.assertEqual((state["claude_id"], state["session_id"]), (COPY_ID, COPY_SID))
+        ledger = json.loads((self.stub.hermes_home / "claude-watch" / "abc12345.json").read_text())
+        self.assertEqual(ledger["state"], "abandoned")
+        [send] = [e for e in self.events() if e["kind"] == "send" and e["claude_id"] == COPY_ID]
+        self.assertEqual((send["op"], send["offset"], send["skip"]), ("restart", 0, 0))
+
     def test_busy_reply_when_not_admitted(self):
         self.meminfo.write_text(meminfo(1000))
         response = self.ask(msgs("hello"))

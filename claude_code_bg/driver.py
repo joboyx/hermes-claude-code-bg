@@ -261,13 +261,7 @@ def follow_up(s: Session, prompt: str, *, name: str, cwd: str, model: str,
     mark the old record `abandoned`. Raises DriverError on a non-zero exit,
     an untrusted workspace, a failed `rm` or a copy without a sessionId.
     """
-    row = agents().get(s.claude_id)
-    if row is not None:
-        stop(s.claude_id)
-        wait_exit(s.claude_id, _row_pid(row))
-        removed = _claude('rm', s.claude_id)
-        if removed.returncode != 0:
-            raise DriverError(f'claude rm {s.claude_id} failed: {_output(removed)[:300]}')
+    retire(s)
     proc = _claude('--resume', s.session_id, *_launch_flags(name, model, effort), '--', prompt,
                    cwd=cwd)
     new_id = _check_launch(proc, 'claude --resume', cwd)
@@ -280,6 +274,21 @@ def follow_up(s: Session, prompt: str, *, name: str, cwd: str, model: str,
     write_ledger(copy, name=name, cwd=cwd, hermes_session=hermes_session)
     write_ledger(s, name=name, cwd=cwd, hermes_session=hermes_session, state='abandoned')
     return copy
+
+
+def retire(s: Session) -> None:
+    """
+    When the row of `s` still exists, `stop` it, wait until it has exited
+    (wait_exit) and `rm` it. Raises DriverError when `rm` fails.
+    """
+    row = agents().get(s.claude_id)
+    if row is None:
+        return
+    stop(s.claude_id)
+    wait_exit(s.claude_id, _row_pid(row))
+    removed = _claude('rm', s.claude_id)
+    if removed.returncode != 0:
+        raise DriverError(f'claude rm {s.claude_id} failed: {_output(removed)[:300]}')
 
 
 def wait_exit(claude_id: str, pid: int | None, tries: int = 60, interval: float = 0.5) -> None:

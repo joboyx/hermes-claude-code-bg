@@ -311,8 +311,9 @@ class Client:
 
     def _send(self, state, conv, tkey, history, n_user, model, effort, hermes_session) -> dict:
         """
-        Dispatch on the first turn, else follow up. Updates `state` with the session and
-        the seen marker, and returns the `sent` turn record: where to read the reply
+        Dispatch on the first turn, else follow up; a session without a transcript is
+        replaced by a new dispatch (op `restart`, see `_unresumable`). Updates `state` with
+        the session and the seen marker, and returns the `sent` turn record: where to read the reply
         (session, byte offset, number of earlier prompt matches to skip) and the exact prompt
         sent. The prompt is the newest user message; messages of this chat the Claude session
         has not seen (the chat ran on another provider) go before it as a quoted block.
@@ -322,23 +323,24 @@ class Client:
         newest = messages.prompt_of(user_msg.get('content'), cwd)
         if not newest:
             raise ValueError('claude-code-bg: the newest user message has no text or image')
+        name = _session_name(conv)
+        t0 = time.time()
         first = not state.get('claude_id')
+        restart = not first and self._unresumable(state, name, cwd)
         block = messages.history_block(
-            messages.unseen_history(history, None if first else state.get('seen')))
+            messages.unseen_history(history, None if first or restart else state.get('seen')))
         prompt = f'{block}\n\n{newest}' if block else newest
         images = messages.saved_images(newest, cwd)
         if images:  # the retention cleanup deletes them with the conversation
             state['images'] = list(dict.fromkeys(state.get('images', []) + images))
-        name = _session_name(conv)
-        t0 = time.time()
-        if first:
+        if first or restart:
             Path(cwd).mkdir(parents=True, exist_ok=True)
             persona = messages.persona()
             s = driver.dispatch(prompt, name=name, cwd=cwd, model=model, effort=effort,
                                 persona=persona, hermes_session=hermes_session)
             state.update(claude_id=s.claude_id, session_id=s.session_id, cwd=cwd,
                          persona=bool(persona))
-            op, offset, skip = 'dispatch', 0, 0
+            op, offset, skip = 'restart' if restart else 'dispatch', 0, 0
         else:
             old = driver.Session(state['claude_id'], state['session_id'])
             offset, skip = transcript.size(old.session_id), 0
@@ -357,6 +359,25 @@ class Client:
         return {'state': 'sent', 'op': op, 'claude_id': s.claude_id, 'session_id': s.session_id,
                 'offset': offset, 'skip': skip, 'prompt': prompt, 'n_user': n_user,
                 'sent_at': t0, 'timing': {'send_s': send_s}}
+
+    def _unresumable(self, state: dict, name: str, cwd: str) -> bool:
+        """
+        Return True when the conversation's session has no transcript, so `--resume` cannot
+        find it: Claude Code saves the transcript some seconds after the start, and a turn
+        stopped before that (a Hermes interrupt, a cancel, the reaper) leaves none. The
+        session is then stopped and removed first, because a running start can still save
+        it, and its ledger record is marked `abandoned`. The caller starts a new session
+        with the whole chat history.
+        """
+        old = driver.Session(state['claude_id'], state['session_id'])
+        if transcript.path_of(old.session_id) is not None:
+            return False
+        driver.retire(old)
+        if transcript.path_of(old.session_id) is not None:
+            return False
+        driver.write_ledger(old, name=name, cwd=cwd, hermes_session=state.get('hermes_session'),
+                            state='abandoned')
+        return True
 
     def _wait(self, request: _Request, conv: str, turn: dict, deadline: float) -> dict:
         """

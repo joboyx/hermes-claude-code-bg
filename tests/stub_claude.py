@@ -53,6 +53,10 @@ Commands:
                                state `done`, status `idle` and the pid of a new
                                detached `sleep`; append the transcript entries.
                                A resume without `copy_as` uses <sid>[:8] as id.
+                               Like Claude Code, a resume of a <sid> that has no
+                               transcript yet still prints the line, but the row
+                               becomes state `failed`, status null, no pid
+                               ("source session not found").
   stop <id>                    row state `stopped`; status and pid per
                                `exit_after` / `pid_alive_after_stop`
   rm <id>                      remove the row
@@ -126,6 +130,13 @@ def launch(fx: dict, argv: list[str]) -> int:
         if fx.get("copy_as"):
             print(f"note: {cid} is still running; started a copy as {fx['copy_as']}")
             cid, sid = fx["copy_as"], fx["copy_session"]
+        elif not list(Path(os.environ["CLAUDE_PROJECTS"]).glob(f"*/{sid}.jsonl")):
+            fx.setdefault("_exiting", {}).pop(cid, None)
+            fx["rows"] = [r for r in fx["rows"] if r.get("id") != cid] + [{
+                "id": cid, "sessionId": sid, "name": name, "kind": "background",
+                "state": "failed", "status": None, "pid": None, "cwd": os.getcwd()}]
+            print(f"backgrounded · {cid} · {name}")
+            return 0
     else:
         if fx.get("fail_dispatch"):
             print(fx["fail_dispatch"], file=sys.stderr)

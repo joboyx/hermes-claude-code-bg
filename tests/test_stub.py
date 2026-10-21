@@ -94,6 +94,13 @@ class StubClaudeTest(unittest.TestCase):
         self.assertIn("backgrounded · abc12345", out)
         self.assertEqual(self.rows()["abc12345"]["sessionId"], SID)
 
+    def test_resume_without_transcript_fails_the_row(self):
+        out = self.run_claude("--resume", SID, "--bg", "--name", "n", "--", "again").stdout
+        self.assertIn("backgrounded · abc12345", out)
+        row = self.rows()["abc12345"]
+        self.assertEqual((row["state"], row["status"], row["pid"]), ("failed", None, None))
+        self.assertFalse((self.stub.projects / "stub" / f"{SID}.jsonl").exists())
+
     def test_resume_copy_note(self):
         self.stub.fx(copy_as="def67890", copy_session="def67890-0000-4000-8000-000000000002")
         self.run_claude("--bg", "--name", "n", "--", "hi")

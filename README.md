@@ -2,7 +2,7 @@
 
 A Hermes Agent model-provider plugin that answers each Hermes chat with a Claude Code background session (`claude --bg`).
 
-- One Hermes session maps to one Claude Code session. The first turn starts it; later turns resume it with only the newest user message. When a chat switches to this provider mid-conversation, the messages the Claude session has not seen go before the newest one as a quoted context block (at most 12,000 characters, newest kept).
+- One Hermes session maps to one Claude Code session. The first turn starts it; later turns resume it with only the newest user message. When a chat switches to this provider mid-conversation, the messages the Claude session has not seen go before the newest one as a quoted context block (at most 12,000 characters, newest kept). A session stopped before Claude Code saved its transcript (an interrupt in its first seconds) cannot be resumed: the next turn starts a new session with the whole chat as that block.
 - Claude Code is the agent: it runs its own tools, skills and hooks. Hermes gets the final text, with no tool calls.
 - The login is the Claude Code subscription already on the host. The plugin holds no credentials and calls only the unmodified `claude` CLI.
 
